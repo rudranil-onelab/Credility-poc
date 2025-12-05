@@ -1,0 +1,38 @@
+# Core Framework (keeping for future use, but not running API now)
+fastapi
+uvicorn[standard]
+
+# AWS Services
+boto3
+botocore
+
+# AI/LLM
+openai
+
+# File & Data Processing
+python-multipart
+python-dotenv
+requests
+
+# Database
+mysql-connector-python
+pandas
+sqlalchemy
+pymysql
+
+# Document Processing (PDF, Images, OCR)
+PyMuPDF
+Pillow
+imagehash
+pytesseract
+python-docx
+
+# Workflow Orchestration
+langgraph
+
+# Data Validation
+pydantic
+
+# Type Support
+typing-extensions
+
