@@ -32,7 +32,8 @@ class CustomAgentService:
         prompt: str,
         mode: str = "ocr+llm",
         tamper_check: bool = False,
-        creator_id: str = None
+        creator_id: str = None,
+        reference_images: List[str] = None
     ) -> Dict[str, Any]:
         """
         Create a new custom validation agent.
@@ -44,9 +45,10 @@ class CustomAgentService:
             mode: Processing mode ('ocr+llm' or 'llm')
             tamper_check: Enable tampering detection (default: False)
             creator_id: User who created this agent
+            reference_images: List of S3 URLs for reference images (up to 5)
         
         Returns:
-            Dict with agent_id, agent_name, endpoint, mode, tamper_check
+            Dict with agent_id, agent_name, endpoint, mode, tamper_check, reference_images
         """
         # Validate agent_name format (lowercase, numbers, underscores only)
         if not re.match(r'^[a-z0-9_]+$', agent_name):
@@ -88,6 +90,28 @@ class CustomAgentService:
                 print(f"[DB] Note: Could not add tamper_check column: {e}")
                 pass  # Column may already exist or other issue
             
+            # Ensure reference_images column exists (add if missing)
+            try:
+                cursor.execute("""
+                    SELECT COUNT(*) 
+                    FROM information_schema.COLUMNS 
+                    WHERE TABLE_SCHEMA = DATABASE() 
+                    AND TABLE_NAME = 'tblcustom_agents' 
+                    AND COLUMN_NAME = 'reference_images'
+                """)
+                column_exists = cursor.fetchone()[0] > 0
+                
+                if not column_exists:
+                    cursor.execute("""
+                        ALTER TABLE tblcustom_agents 
+                        ADD COLUMN reference_images TEXT DEFAULT NULL
+                    """)
+                    self.db.commit()
+                    print("[DB] Added reference_images column to tblcustom_agents table")
+            except Exception as e:
+                print(f"[DB] Note: Could not add reference_images column: {e}")
+                pass  # Column may already exist or other issue
+            
             # Check if agent already exists
             cursor.execute(
                 "SELECT id FROM tblcustom_agents WHERE agent_name = %s",
@@ -99,12 +123,15 @@ class CustomAgentService:
             # Generate endpoint
             endpoint = f"/api/agent/{agent_name}/validate"
             
-            # Insert new agent with tamper_check
+            # Serialize reference_images to JSON string
+            reference_images_json = json.dumps(reference_images) if reference_images else None
+            
+            # Insert new agent with tamper_check and reference_images
             cursor.execute("""
                 INSERT INTO tblcustom_agents 
-                (agent_name, display_name, prompt, endpoint, mode, tamper_check, creator_id, is_active, total_hits)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, 0)
-            """, (agent_name, display_name, prompt, endpoint, mode, tamper_check, creator_id))
+                (agent_name, display_name, prompt, endpoint, mode, tamper_check, creator_id, is_active, total_hits, reference_images)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, 0, %s)
+            """, (agent_name, display_name, prompt, endpoint, mode, tamper_check, creator_id, reference_images_json))
             
             self.db.commit()
             agent_id = cursor.lastrowid
@@ -114,7 +141,8 @@ class CustomAgentService:
                 "agent_name": agent_name,
                 "endpoint": endpoint,
                 "mode": mode,
-                "tamper_check": tamper_check
+                "tamper_check": tamper_check,
+                "reference_images": reference_images
             }
         finally:
             cursor.close()
@@ -135,6 +163,14 @@ class CustomAgentService:
                     agent['created_at'] = agent['created_at'].isoformat()
                 if agent.get('updated_at'):
                     agent['updated_at'] = agent['updated_at'].isoformat()
+                # Parse reference_images JSON
+                if agent.get('reference_images'):
+                    try:
+                        agent['reference_images'] = json.loads(agent['reference_images'])
+                    except (json.JSONDecodeError, TypeError):
+                        agent['reference_images'] = None
+                else:
+                    agent['reference_images'] = None
             
             return agent
         finally:
@@ -155,6 +191,14 @@ class CustomAgentService:
                     agent['created_at'] = agent['created_at'].isoformat()
                 if agent.get('updated_at'):
                     agent['updated_at'] = agent['updated_at'].isoformat()
+                # Parse reference_images JSON
+                if agent.get('reference_images'):
+                    try:
+                        agent['reference_images'] = json.loads(agent['reference_images'])
+                    except (json.JSONDecodeError, TypeError):
+                        agent['reference_images'] = None
+                else:
+                    agent['reference_images'] = None
             
             return agent
         finally:
@@ -167,7 +211,8 @@ class CustomAgentService:
         prompt: str = None,
         mode: str = None,
         tamper_check: bool = None,
-        is_active: bool = None
+        is_active: bool = None,
+        reference_images: List[str] = None
     ) -> bool:
         """Update an existing agent."""
         cursor = self.db.cursor()
@@ -198,6 +243,10 @@ class CustomAgentService:
             if is_active is not None:
                 updates.append("is_active = %s")
                 params.append(is_active)
+            
+            if reference_images is not None:
+                updates.append("reference_images = %s")
+                params.append(json.dumps(reference_images) if reference_images else None)
             
             if not updates:
                 return False
@@ -247,12 +296,20 @@ class CustomAgentService:
             cursor.execute(query, params)
             agents = cursor.fetchall()
             
-            # Format timestamps
+            # Format timestamps and parse reference_images
             for agent in agents:
                 if agent.get('created_at'):
                     agent['created_at'] = agent['created_at'].isoformat()
                 if agent.get('updated_at'):
                     agent['updated_at'] = agent['updated_at'].isoformat()
+                # Parse reference_images JSON
+                if agent.get('reference_images'):
+                    try:
+                        agent['reference_images'] = json.loads(agent['reference_images'])
+                    except (json.JSONDecodeError, TypeError):
+                        agent['reference_images'] = None
+                else:
+                    agent['reference_images'] = None
             
             return agents
         finally:
@@ -441,6 +498,14 @@ Validate the document against ALL the user's rules above. Return JSON result.
                     agent['created_at'] = agent['created_at'].isoformat()
                 if agent.get('updated_at'):
                     agent['updated_at'] = agent['updated_at'].isoformat()
+                # Parse reference_images JSON
+                if agent.get('reference_images'):
+                    try:
+                        agent['reference_images'] = json.loads(agent['reference_images'])
+                    except (json.JSONDecodeError, TypeError):
+                        agent['reference_images'] = None
+                else:
+                    agent['reference_images'] = None
             
             return agents
         finally:
@@ -579,6 +644,115 @@ Validate the document against ALL the user's rules above. Return JSON result.
                     "hits": int(month['hits'] or 0),
                     "pass": int(month['pass_count'] or 0),
                     "fail": int(month['fail_count'] or 0)
+                }
+            }
+        finally:
+            cursor.close()
+    
+    def get_agent_logs(
+        self,
+        agent_name: str,
+        limit: int = 100,
+        offset: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Get detailed validation logs for an agent.
+        
+        Returns all validation results including:
+        - user_id, status, score, reason
+        - file_input (S3 URL of input document)
+        - doc_extracted_json, document_type
+        - tampering details
+        - OCR extraction details
+        - processing_time_ms, created_at
+        
+        Args:
+            agent_name: Name of the agent
+            limit: Maximum number of logs to return
+            offset: Offset for pagination
+        
+        Returns:
+            Dict with logs array and pagination info
+        """
+        cursor = self.db.cursor(dictionary=True)
+        
+        try:
+            # Get total count
+            cursor.execute("""
+                SELECT COUNT(*) as total
+                FROM tblcustom_agent_results
+                WHERE agent_name = %s
+            """, (agent_name,))
+            total_result = cursor.fetchone()
+            total_logs = total_result['total'] if total_result else 0
+            
+            # Get logs with all details
+            cursor.execute("""
+                SELECT 
+                    id,
+                    agent_id,
+                    agent_name,
+                    api_endpoint,
+                    user_id,
+                    result,
+                    request_ip,
+                    processing_time_ms,
+                    created_at
+                FROM tblcustom_agent_results
+                WHERE agent_name = %s
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+            """, (agent_name, limit, offset))
+            
+            raw_logs = cursor.fetchall()
+            
+            # Process logs and expand the result JSON
+            logs = []
+            for log in raw_logs:
+                # Parse the result JSON
+                result_data = {}
+                if log.get('result'):
+                    try:
+                        result_data = json.loads(log['result']) if isinstance(log['result'], str) else log['result']
+                    except (json.JSONDecodeError, TypeError):
+                        result_data = {}
+                
+                # Build comprehensive log entry
+                log_entry = {
+                    "id": log.get('id'),
+                    "user_id": log.get('user_id'),
+                    "success": True,  # If record exists, request was successful
+                    "status": result_data.get('status', 'unknown'),
+                    "score": result_data.get('score', 0),
+                    "reason": result_data.get('reason', []),
+                    "file_name": result_data.get('file_name'),
+                    "file_input": result_data.get('file_input'),  # S3 URL of input document
+                    "doc_extracted_json": result_data.get('doc_extracted_json', {}),
+                    "document_type": result_data.get('document_type'),
+                    "processing_time_ms": log.get('processing_time_ms'),
+                    "agent_name": log.get('agent_name'),
+                    # Tampering details
+                    "tampering_score": result_data.get('tampering_score'),
+                    "tampering_status": result_data.get('tampering_status'),
+                    "tampering_details": result_data.get('tampering_details'),
+                    # OCR extraction quality
+                    "ocr_extraction_status": result_data.get('ocr_extraction_status'),
+                    "ocr_extraction_confidence": result_data.get('ocr_extraction_confidence'),
+                    "ocr_extraction_reason": result_data.get('ocr_extraction_reason'),
+                    # Metadata
+                    "request_ip": log.get('request_ip'),
+                    "created_at": log['created_at'].isoformat() if log.get('created_at') else None
+                }
+                
+                logs.append(log_entry)
+            
+            return {
+                "total_logs": total_logs,
+                "logs": logs,
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "has_more": offset + limit < total_logs
                 }
             }
         finally:

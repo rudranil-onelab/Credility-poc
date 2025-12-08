@@ -293,6 +293,349 @@ Summary: {knowledge_text}
         }
 
 
+def merge_knowledge_from_multiple_images(
+    image_paths: List[str],
+    user_prompt: str
+) -> Dict[str, Any]:
+    """
+    Extract knowledge from multiple reference images and merge into a single consolidated prompt.
+    
+    Handles:
+    - Deduplication of repeated fields/rules across images
+    - Resolution of contradictory information
+    - Consolidation into a coherent validation prompt
+    
+    Args:
+        image_paths: List of paths to reference images (up to 5)
+        user_prompt: User's original validation description
+    
+    Returns:
+        Dict with:
+        - success: bool
+        - enhanced_prompt: Final merged prompt
+        - extracted_knowledge: Consolidated knowledge from all images
+        - per_image_knowledge: List of knowledge extracted from each image
+        - contradictions_found: List of any contradictions detected and how they were resolved
+        - document_type: Detected document type
+        - unique_fields: List of all unique fields found
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    
+    # Step 1: Extract knowledge from each image
+    per_image_knowledge = []
+    successful_extractions = []
+    
+    print(f"[Multi-Image Training] Processing {len(image_paths)} reference images...")
+    
+    for idx, image_path in enumerate(image_paths, start=1):
+        print(f"[Multi-Image Training] Extracting knowledge from image {idx}/{len(image_paths)}: {os.path.basename(image_path)}")
+        
+        result = extract_knowledge_from_reference_image(
+            image_path_or_url=image_path,
+            user_prompt=user_prompt
+        )
+        
+        per_image_knowledge.append({
+            "image_index": idx,
+            "image_path": os.path.basename(image_path),
+            "success": result.get("success", False),
+            "knowledge": result.get("extracted_knowledge", ""),
+            "document_type": result.get("document_type", "Unknown"),
+            "fields": result.get("fields", []),
+            "validation_tips": result.get("validation_tips", []),
+            "error": result.get("error")
+        })
+        
+        if result.get("success"):
+            successful_extractions.append({
+                "index": idx,
+                "knowledge": result.get("extracted_knowledge", ""),
+                "document_type": result.get("document_type", "Unknown"),
+                "fields": result.get("fields", []),
+                "validation_tips": result.get("validation_tips", []),
+                "raw_knowledge": result.get("raw_knowledge", {})
+            })
+            print(f"[Multi-Image Training] ✓ Image {idx}: Extracted {len(result.get('fields', []))} fields")
+        else:
+            print(f"[Multi-Image Training] ✗ Image {idx}: Failed - {result.get('error', 'Unknown error')}")
+    
+    # If no successful extractions, return original prompt
+    if not successful_extractions:
+        print("[Multi-Image Training] No successful extractions from any image")
+        return {
+            "success": False,
+            "enhanced_prompt": user_prompt,
+            "extracted_knowledge": None,
+            "per_image_knowledge": per_image_knowledge,
+            "contradictions_found": [],
+            "document_type": "Unknown",
+            "unique_fields": [],
+            "error": "Failed to extract knowledge from any reference image"
+        }
+    
+    # If only one successful extraction, use it directly (no merging needed)
+    if len(successful_extractions) == 1:
+        print("[Multi-Image Training] Only 1 successful extraction, using directly without merging")
+        return {
+            "success": True,
+            "enhanced_prompt": f"{user_prompt}\n{successful_extractions[0]['knowledge']}",
+            "extracted_knowledge": successful_extractions[0]['knowledge'],
+            "per_image_knowledge": per_image_knowledge,
+            "contradictions_found": [],
+            "document_type": successful_extractions[0]['document_type'],
+            "unique_fields": [f.get("name", "") for f in successful_extractions[0].get('fields', [])]
+        }
+    
+    # Step 2: Merge knowledge from multiple images using LLM
+    print(f"[Multi-Image Training] Merging knowledge from {len(successful_extractions)} images...")
+    
+    merge_prompt = f"""You are a document analysis expert. You have been given knowledge extracted from {len(successful_extractions)} reference images of the same document type.
+
+Your task is to MERGE and CONSOLIDATE this knowledge into a SINGLE, coherent set of validation rules and field definitions.
+
+═══════════════════════════════════════════════════════════════════════════════
+                         CRITICAL RULES FOR MERGING
+═══════════════════════════════════════════════════════════════════════════════
+
+1. **DEDUPLICATION**: 
+   - If the same field appears in multiple images, include it ONLY ONCE
+   - Merge field descriptions - take the most complete/detailed version
+   - Example: If Image 1 says "PAN: 10 chars" and Image 2 says "PAN Number: 10 alphanumeric, format AAAAA9999A"
+     → Use: "PAN Number: 10 alphanumeric characters, format AAAAA9999A"
+
+2. **CONTRADICTION RESOLUTION**: 
+   - If images have conflicting information (e.g., different date formats, different field requirements):
+     a) If one value appears more frequently across images, use that
+     b) If equal frequency, prefer the more specific/detailed version
+     c) If genuinely conflicting (e.g., "required" vs "optional"), note as contradiction
+   - Document ALL contradictions found with your resolution
+
+3. **FIELD CONSOLIDATION**:
+   - Same field with different names = ONE field (e.g., "DOB", "Date of Birth", "Birth Date" → "Date of Birth")
+   - Merge validation rules for the same field
+   - Keep the most comprehensive format pattern
+
+4. **VALIDATION RULES**:
+   - Combine all unique validation rules from all images
+   - Remove duplicate rules (same meaning, different wording)
+   - Keep rules that appear in majority of images as "required"
+   - Note rules that appear in only one image as "optional/additional"
+
+5. **ORGANIZATION**: 
+   - Group related fields together (personal info, document numbers, dates, etc.)
+   - List fields in logical order (most important first)
+
+═══════════════════════════════════════════════════════════════════════════════
+                    KNOWLEDGE FROM EACH REFERENCE IMAGE
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+    
+    for extraction in successful_extractions:
+        merge_prompt += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IMAGE {extraction['index']} - Document Type: {extraction['document_type']}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FIELDS FOUND:
+{json.dumps(extraction.get('fields', []), indent=2, ensure_ascii=False)}
+
+VALIDATION TIPS:
+{json.dumps(extraction.get('validation_tips', []), indent=2, ensure_ascii=False)}
+
+FULL KNOWLEDGE:
+{extraction['knowledge']}
+
+"""
+    
+    merge_prompt += """
+═══════════════════════════════════════════════════════════════════════════════
+                              YOUR TASK
+═══════════════════════════════════════════════════════════════════════════════
+
+Analyze all the knowledge above and return a JSON object with:
+
+{
+    "document_type": "The detected document type (use most common across images)",
+    "document_description": "Brief description of what this document is",
+    
+    "consolidated_fields": [
+        {
+            "name": "Canonical field name",
+            "aliases": ["other names this field appeared as"],
+            "format": "Expected format/pattern (most detailed version)",
+            "validation_rule": "How to validate (merged from all images)",
+            "location": "Where on document",
+            "required": true/false,
+            "appeared_in_images": [1, 2, 3]
+        }
+    ],
+    
+    "validation_rules": [
+        {
+            "rule": "Description of the validation rule",
+            "source_images": [1, 2],
+            "priority": "required" or "recommended" or "optional"
+        }
+    ],
+    
+    "contradictions": [
+        {
+            "field_or_rule": "What had conflicting info",
+            "image_1_value": "Value from image 1",
+            "image_2_value": "Value from image 2",
+            "resolution": "Which value was chosen and why",
+            "confidence": "high" / "medium" / "low"
+        }
+    ],
+    
+    "visual_characteristics": {
+        "layout": "portrait/landscape (most common)",
+        "key_elements": ["merged list of visual elements"],
+        "security_features": ["merged list of security features"]
+    },
+    
+    "consolidated_knowledge_summary": "A comprehensive paragraph summarizing ALL knowledge learned from ALL images. This should be detailed enough to validate future documents."
+}
+
+Return ONLY valid JSON."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are an expert at analyzing and consolidating document validation rules from multiple reference images. Always return valid JSON. Be thorough in deduplication and contradiction resolution."},
+                {"role": "user", "content": merge_prompt}
+            ]
+        )
+        
+        merged_result = json.loads(response.choices[0].message.content)
+        
+        # Build the final consolidated knowledge string
+        consolidated_knowledge = f"""
+═══════════════════════════════════════════════════════════════════════════════
+        CONSOLIDATED KNOWLEDGE FROM {len(successful_extractions)} REFERENCE IMAGES
+═══════════════════════════════════════════════════════════════════════════════
+
+Document Type: {merged_result.get('document_type', 'Unknown')}
+Description: {merged_result.get('document_description', '')}
+
+"""
+        
+        # Add consolidated fields
+        consolidated_knowledge += "EXPECTED FIELDS:\n"
+        unique_fields = []
+        for field in merged_result.get("consolidated_fields", []):
+            field_name = field.get("name", "Unknown")
+            unique_fields.append(field_name)
+            aliases = field.get("aliases", [])
+            alias_str = f" (also known as: {', '.join(aliases)})" if aliases else ""
+            required_str = "REQUIRED" if field.get("required", True) else "OPTIONAL"
+            
+            consolidated_knowledge += f"""
+   • {field_name}{alias_str}
+     Format: {field.get('format', 'N/A')}
+     Validation: {field.get('validation_rule', 'N/A')}
+     Location: {field.get('location', 'N/A')}
+     Status: {required_str}
+"""
+        
+        # Add validation rules
+        validation_rules = merged_result.get("validation_rules", [])
+        if validation_rules:
+            consolidated_knowledge += "\nVALIDATION RULES:\n"
+            for rule in validation_rules:
+                priority = rule.get("priority", "required").upper()
+                consolidated_knowledge += f"   • [{priority}] {rule.get('rule', '')}\n"
+        
+        # Add visual characteristics
+        visual = merged_result.get("visual_characteristics", {})
+        if visual:
+            consolidated_knowledge += f"""
+VISUAL CHARACTERISTICS:
+   • Layout: {visual.get('layout', 'N/A')}
+   • Key Elements: {', '.join(visual.get('key_elements', []))}
+   • Security Features: {', '.join(visual.get('security_features', []))}
+"""
+        
+        # Add contradiction notes if any
+        contradictions = merged_result.get("contradictions", [])
+        if contradictions:
+            consolidated_knowledge += "\nNOTES - RESOLVED CONTRADICTIONS:\n"
+            for c in contradictions:
+                consolidated_knowledge += f"""   • {c.get('field_or_rule', 'Unknown')}:
+     - Image values: "{c.get('image_1_value', '')}" vs "{c.get('image_2_value', '')}"
+     - Resolution: {c.get('resolution', 'N/A')}
+     - Confidence: {c.get('confidence', 'medium')}
+"""
+        
+        # Add summary
+        consolidated_knowledge += f"""
+SUMMARY:
+{merged_result.get('consolidated_knowledge_summary', '')}
+
+═══════════════════════════════════════════════════════════════════════════════
+"""
+        
+        # Build final enhanced prompt
+        enhanced_prompt = f"""{user_prompt}
+
+{consolidated_knowledge}"""
+        
+        print(f"[Multi-Image Training] ✓ Successfully merged knowledge from {len(successful_extractions)} images")
+        print(f"[Multi-Image Training] Found {len(unique_fields)} unique fields")
+        print(f"[Multi-Image Training] Resolved {len(contradictions)} contradictions")
+        
+        return {
+            "success": True,
+            "enhanced_prompt": enhanced_prompt,
+            "extracted_knowledge": consolidated_knowledge,
+            "per_image_knowledge": per_image_knowledge,
+            "contradictions_found": contradictions,
+            "document_type": merged_result.get("document_type", "Unknown"),
+            "unique_fields": unique_fields,
+            "consolidated_fields": merged_result.get("consolidated_fields", []),
+            "validation_rules": merged_result.get("validation_rules", [])
+        }
+        
+    except Exception as e:
+        print(f"[Multi-Image Training] Error merging knowledge: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Fallback: concatenate all knowledge without intelligent merging
+        print("[Multi-Image Training] Falling back to simple concatenation...")
+        fallback_knowledge = f"""
+═══════════════════════════════════════════════════════════════════════════════
+        KNOWLEDGE FROM {len(successful_extractions)} REFERENCE IMAGES (NOT MERGED)
+═══════════════════════════════════════════════════════════════════════════════
+"""
+        
+        all_fields = []
+        for extraction in successful_extractions:
+            fallback_knowledge += f"""
+━━━ From Image {extraction['index']} ({extraction['document_type']}) ━━━
+{extraction['knowledge']}
+"""
+            all_fields.extend([f.get("name", "") for f in extraction.get('fields', [])])
+        
+        # Deduplicate field names at least
+        unique_fields = list(set(all_fields))
+        
+        return {
+            "success": True,
+            "enhanced_prompt": f"{user_prompt}\n{fallback_knowledge}",
+            "extracted_knowledge": fallback_knowledge,
+            "per_image_knowledge": per_image_knowledge,
+            "contradictions_found": [],
+            "document_type": successful_extractions[0]['document_type'],
+            "unique_fields": unique_fields,
+            "merge_warning": f"Intelligent merge failed ({str(e)}), using concatenated knowledge"
+        }
+
+
 def extract_and_validate_generic(
     image_urls: List[str],
     user_prompt: str,
