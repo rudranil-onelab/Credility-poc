@@ -122,6 +122,10 @@ class ValidationResponse(BaseModel):
     tampering_score: Optional[int] = Field(None, description="Tampering risk score (0-100)")
     tampering_status: Optional[str] = Field(None, description="Tampering detection status: 'pass' or 'fail'")
     tampering_details: Optional[Dict[str, Any]] = Field(None, description="Tampering detection details")
+    # OCR extraction quality fields
+    ocr_extraction_status: Optional[str] = Field(None, description="OCR extraction quality status: 'pass' or 'fail'. Pass if confidence >= 70%, fail otherwise.")
+    ocr_extraction_confidence: Optional[float] = Field(None, description="Average OCR confidence score from AWS Textract (0-100)")
+    ocr_extraction_reason: Optional[str] = Field(None, description="Human-readable reason explaining the OCR extraction quality")
 
 
 # ==================== Database Connection ====================
@@ -618,7 +622,11 @@ async def validate_document(
             agent_name=agent_name,
             tampering_score=result.get("tampering_score"),
             tampering_status=result.get("tampering_status"),
-            tampering_details=result.get("tampering_details")
+            tampering_details=result.get("tampering_details"),
+            # OCR extraction quality fields
+            ocr_extraction_status=result.get("ocr_extraction_status"),
+            ocr_extraction_confidence=result.get("ocr_extraction_confidence"),
+            ocr_extraction_reason=result.get("ocr_extraction_reason")
         )
         
     except HTTPException:

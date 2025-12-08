@@ -381,42 +381,25 @@ Analyze this {doc_type} document image carefully for signs of visual tampering o
 
 CHECK FOR THESE INDICATORS:
 
-1. **Font Inconsistencies**:
-   - Different fonts used for similar fields (e.g., name in one font, date in another)
-   - Font sizes that don't match the document style
-   - Font weights that vary unexpectedly
-
-2. **Alignment & Layout Issues**:
-   - Text fields not properly aligned with document grid/lines
-   - Crooked or rotated text that doesn't match document orientation
-   - Inconsistent spacing between fields
-   - Fields positioned incorrectly (e.g., date in wrong location)
-
-3. **Color & Background Mismatches**:
-   - Background color changes or patches
-   - Text color variations that don't match document style
-   - Blurred or erased regions with different background color
-   - White patches or colored overlays
-
-4. **Security Feature Anomalies**:
+1. **Security Feature Anomalies**:
    - Missing watermarks, logos, or holograms that should be present
    - Security features that look suspicious or poorly integrated
    - Missing QR codes or barcodes (for documents that require them)
    - Security patterns that appear inconsistent
 
-5. **Editing Artifacts**:
+2. **Editing Artifacts**:
    - Visible editing boundaries (sharp edges, pixelation)
    - Cloned or duplicated regions (copy-paste artifacts)
    - Blur patches indicating content was erased and replaced
    - Compression artifacts in specific regions (suggesting re-editing)
    - Shadow inconsistencies (text shadows don't match lighting)
 
-6. **Photo Quality Issues**:
+3. **Photo Quality Issues**:
    - Excessive blur in specific regions (not overall photo quality)
    - Multiple compression artifacts suggesting multiple edits
    - Quality variations across the document
 
-7. **Content Consistency** (compare with extracted fields):
+4. **Content Consistency** (compare with extracted fields):
    - Visual layout doesn't match expected document template
    - Fields are in unexpected positions for this document type
 {metadata_context}
@@ -432,7 +415,6 @@ IMPORTANT RULES:
 - Real documents may have some blur from photography - that's normal
 - Focus on INCONSISTENCIES within the document, not overall quality
 - Missing security features are more suspicious than poor quality photos
-- Multiple different fonts/styles in similar fields = high risk
 - Metadata tampering indicators should INCREASE risk score significantly
 
 Return JSON with this EXACT structure:
@@ -442,7 +424,7 @@ Return JSON with this EXACT structure:
   "risk_score": 0-100,
   "indicators": [
     {{
-      "type": "font_mismatch|alignment|color|security_feature|editing_artifact|layout|quality|metadata",
+      "type": "security_feature|editing_artifact|layout|quality|metadata",
       "severity": "high|medium|low",
       "description": "Clear description of what was found",
       "location": "where on document (e.g., 'name field', 'date section', 'top-right', 'metadata')"

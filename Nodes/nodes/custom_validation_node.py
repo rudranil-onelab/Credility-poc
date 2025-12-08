@@ -287,8 +287,17 @@ def run_custom_validation_pipeline(
                 "processing_time_ms": int((time.time() - start_time) * 1000),
                 "tampering_score": None,
                 "tampering_status": None,
-                "tampering_details": None
+                "tampering_details": None,
+                # OCR extraction quality fields
+                "ocr_extraction_status": "fail",
+                "ocr_extraction_confidence": 0.0,
+                "ocr_extraction_reason": "AWS Textract could not extract any text from the document. The document may be blank, corrupted, or in an unsupported format."
             }
+        
+        # Calculate OCR extraction quality from Textract confidence scores
+        ocr_quality = calculate_textract_confidence(textract_result)
+        print(f"[Custom Pipeline] OCR Quality: {ocr_quality['status']} ({ocr_quality['average_confidence']:.1f}% confidence)")
+        print(f"[Custom Pipeline] OCR Reason: {ocr_quality['reason']}")
         
         # Extract text from Textract blocks
         ocr_text = extract_text_from_textract(textract_result)
@@ -429,7 +438,11 @@ def run_custom_validation_pipeline(
             "processing_time_ms": processing_time_ms,
             "tampering_score": tampering_score,
             "tampering_status": tampering_status,
-            "tampering_details": tampering_details  # Include full tampering analysis with metadata
+            "tampering_details": tampering_details,  # Include full tampering analysis with metadata
+            # OCR extraction quality fields
+            "ocr_extraction_status": ocr_quality["status"],
+            "ocr_extraction_confidence": ocr_quality["average_confidence"],
+            "ocr_extraction_reason": ocr_quality["reason"]
         }
         
         print(f"\n{'='*60}")
@@ -458,7 +471,11 @@ def run_custom_validation_pipeline(
             "processing_time_ms": processing_time_ms,
             "tampering_score": None,
             "tampering_status": None,
-            "tampering_details": None
+            "tampering_details": None,
+            # OCR extraction quality fields
+            "ocr_extraction_status": None,
+            "ocr_extraction_confidence": None,
+            "ocr_extraction_reason": f"Pipeline error occurred: {str(e)}"
         }
 
 
@@ -475,3 +492,110 @@ def extract_text_from_textract(textract_result: dict) -> str:
     
     return "\n".join(lines)
 
+
+def calculate_textract_confidence(textract_result: dict, confidence_threshold: float = 90.0) -> Dict[str, Any]:
+    """
+    Calculate overall OCR extraction quality from Textract confidence scores.
+    
+    AWS Textract returns a 'Confidence' score (0-100) for each block.
+    This function analyzes these scores to determine extraction quality.
+    
+    Args:
+        textract_result: Result from run_textract_local_file
+        confidence_threshold: Minimum acceptable confidence (default 90%)
+    
+    Returns:
+        Dict with:
+        - status: "pass" or "fail"
+        - average_confidence: Average confidence score
+        - reason: Human-readable explanation
+        - details: Additional metrics
+    """
+    blocks = textract_result.get("blocks", [])
+    
+    if not blocks:
+        return {
+            "status": "fail",
+            "average_confidence": 0.0,
+            "reason": "No text could be extracted from the document. The document may be blank, corrupted, or in an unsupported format.",
+            "details": {
+                "total_blocks": 0,
+                "line_count": 0,
+                "word_count": 0,
+                "low_confidence_blocks": 0
+            }
+        }
+    
+    # Collect confidence scores by block type
+    line_confidences = []
+    word_confidences = []
+    all_confidences = []
+    low_confidence_blocks = []
+    
+    for block in blocks:
+        block_type = block.get("BlockType", "")
+        confidence = block.get("Confidence", 0)
+        
+        if confidence > 0:
+            all_confidences.append(confidence)
+            
+            if block_type == "LINE":
+                line_confidences.append(confidence)
+                if confidence < confidence_threshold:
+                    text = block.get("Text", "")[:50]
+                    low_confidence_blocks.append({
+                        "type": "LINE",
+                        "text": text,
+                        "confidence": round(confidence, 2)
+                    })
+            elif block_type == "WORD":
+                word_confidences.append(confidence)
+                if confidence < confidence_threshold:
+                    text = block.get("Text", "")
+                    low_confidence_blocks.append({
+                        "type": "WORD",
+                        "text": text,
+                        "confidence": round(confidence, 2)
+                    })
+    
+    # Calculate averages
+    avg_all = sum(all_confidences) / len(all_confidences) if all_confidences else 0
+    avg_lines = sum(line_confidences) / len(line_confidences) if line_confidences else 0
+    avg_words = sum(word_confidences) / len(word_confidences) if word_confidences else 0
+    
+    # Count blocks below threshold
+    low_conf_count = len([c for c in all_confidences if c < confidence_threshold])
+    low_conf_percentage = (low_conf_count / len(all_confidences) * 100) if all_confidences else 100
+    
+    # Determine status and reason
+    if avg_all >= confidence_threshold:
+        status = "pass"
+        reason = f"Data extracted successfully with {avg_all:.1f}% average confidence. Document is clear and readable."
+    elif avg_all >= 70:
+        status = "pass"  # Acceptable but with warning
+        reason = f"Data extracted with {avg_all:.1f}% average confidence. Some text may be unclear but extraction is acceptable."
+    elif avg_all >= 50:
+        status = "fail"
+        reason = f"Low extraction quality ({avg_all:.1f}% confidence). Document may be blurry, have poor lighting, or contain hard-to-read text. Consider re-uploading a clearer image."
+    else:
+        status = "fail"
+        # Determine specific reason based on analysis
+        if len(all_confidences) < 5:
+            reason = f"Very little text could be extracted ({avg_all:.1f}% confidence). Document may be mostly blank, heavily damaged, or the image quality is too poor."
+        else:
+            reason = f"Data extraction failed ({avg_all:.1f}% confidence). Document appears to be blurry, low resolution, or poorly scanned. Please upload a higher quality image."
+    
+    return {
+        "status": status,
+        "average_confidence": round(avg_all, 2),
+        "reason": reason,
+        "details": {
+            "total_blocks": len(blocks),
+            "line_count": len(line_confidences),
+            "word_count": len(word_confidences),
+            "avg_line_confidence": round(avg_lines, 2),
+            "avg_word_confidence": round(avg_words, 2),
+            "low_confidence_percentage": round(low_conf_percentage, 2),
+            "low_confidence_samples": low_confidence_blocks[:5]  # First 5 problematic blocks
+        }
+    }
