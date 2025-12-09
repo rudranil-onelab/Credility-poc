@@ -141,7 +141,7 @@ def llm_extract_page(doc_type: str, page_data: Dict[str, Any]) -> Dict[str, Any]
         "kvs":   page_data.get("kvs", []),
     }
     system = PROMPTS_BY_TYPE.get(doc_type, PROMPTS_BY_TYPE["unknown"])
-    out = chat_json("gpt-4o", system, llm_input) or {}
+    out = chat_json("claude-3-5-haiku", system, llm_input) or {}
     return remove_raw_text_fields(out)
 
 
@@ -252,14 +252,14 @@ def run_pipeline_local(local_path: str, mode: str = "ocr+llm") -> Dict[str, Any]
     try:
         # Step 1: Classify document type
         print("[OCR LOCAL] Step 1: Classifying document type...")
-        doc_type = classify_via_image("gpt-4o", image_url)
+        doc_type = classify_via_image("claude-3-5-haiku", image_url)
         print(f"[OCR LOCAL] Detected document type: {doc_type}")
         
         # Step 2: Extract data based on document type
         print("[OCR LOCAL] Step 2: Extracting structured data...")
         
         # Use the extract_via_image function with correct parameters
-        structured_data = extract_via_image("gpt-4o", doc_type, image_url, PROMPTS_BY_TYPE)
+        structured_data = extract_via_image("claude-3-5-haiku", doc_type, image_url, PROMPTS_BY_TYPE)
         
         # Add document type to structured data
         structured_data["doc_type"] = doc_type
@@ -428,9 +428,9 @@ def run_pipeline(bucket: str, key: str, mode: str = "ocr+llm") -> Dict[str, Any]
             image_url = generate_presigned_url(bucket, key)
             
             if image_url:
-                doc_type = classify_via_image("gpt-4o", image_url)
+                doc_type = classify_via_image("claude-3-5-haiku", image_url)
                 print(f"[Router] Document type: {doc_type}")
-                image_extracted = extract_via_image("gpt-4o", doc_type, image_url, PROMPTS_BY_TYPE)
+                image_extracted = extract_via_image("claude-3-5-haiku", doc_type, image_url, PROMPTS_BY_TYPE)
                 simplified = {"pages": {1: {"lines": [], "words": [], "cells": [], "kvs": []}}}
             else:
                 doc_type = "unknown"

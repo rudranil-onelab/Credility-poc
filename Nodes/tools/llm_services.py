@@ -1,97 +1,37 @@
 """
-LLM utilities for OpenAI integration and document processing.
+LLM utilities for AWS Bedrock Claude integration and document processing.
 """
 
 import json
 from typing import Dict, Any, Optional
 
-from ..config.settings import OPENAI_API_KEY, OPENAI_MODEL, ROUTE_LABELS
-
-
-def strip_json_code_fences(s: str) -> str:
-    """Remove JSON code fences from string."""
-    s = s.strip()
-    if s.startswith("```"):
-        first_nl = s.find("\n")
-        if first_nl != -1:
-            s = s[first_nl+1:]
-        if s.endswith("```"):
-            s = s[:-3].strip()
-    return s
+from ..config.settings import BEDROCK_REGION, BEDROCK_MODEL_ID, ROUTE_LABELS
+from .bedrock_client import (
+    get_bedrock_client,
+    chat_json as bedrock_chat_json,
+    chat_json_with_image,
+    strip_json_code_fences
+)
 
 
 def chat_json(model: str, system_text: str, user_payload: dict) -> dict:
     """
-    Try strict JSON mode. If it fails or returns malformed JSON, fall back safely.
+    Get JSON response from Claude via Bedrock.
     Always return a dict (possibly empty) — never raise here.
-    Supports both new SDK (OpenAI) and legacy openai.ChatCompletion.
+    
+    Args:
+        model: Model identifier (kept for API compatibility, uses Bedrock model)
+        system_text: System prompt
+        user_payload: Dict to send as user message
+        
+    Returns:
+        Parsed JSON dict
     """
-    system_msg = (
-        system_text
-        + "\n\nReturn a single JSON object only. Do not include any extra text."
+    return bedrock_chat_json(
+        system=system_text,
+        user_payload=user_payload,
+        temperature=0
     )
-    user_msg = (
-        "You MUST return a single JSON object only (JSON). No prose, no code fences.\n\n"
-        "Payload follows as JSON:\n"
-        + json.dumps(user_payload, ensure_ascii=False)
-    )
-
-    if not OPENAI_API_KEY:
-        return {}
-
-    # Preferred: new SDK
-    try:
-        from openai import OpenAI  # type: ignore
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                response_format={"type": "json_object"},
-                temperature=0,
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg},
-                ],
-            )
-            content = resp.choices[0].message.content
-            return json.loads(content)
-        except Exception:
-            # fallback without response_format
-            try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    temperature=0,
-                    messages=[
-                        {"role": "system", "content": system_msg + "\n(You must still return JSON.)"},
-                        {"role": "user", "content": user_msg},
-                    ],
-                )
-                raw = resp.choices[0].message.content
-                raw = strip_json_code_fences(raw)
-                return json.loads(raw)
-            except Exception:
-                return {}
-    except Exception:
-        # Legacy openai
-        try:
-            import openai  # type: ignore
-            openai.api_key = OPENAI_API_KEY
-            try:
-                resp = openai.ChatCompletion.create(
-                    model=model,
-                    temperature=0,
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": user_msg},
-                    ],
-                )
-                raw = resp["choices"][0]["message"]["content"]
-                raw = strip_json_code_fences(raw)
-                return json.loads(raw)
-            except Exception:
-                return {}
-        except Exception:
-            return {}
 
 
 def remove_raw_text_fields(obj: Any) -> Any:
@@ -137,23 +77,15 @@ Available labels: {ROUTE_LABELS}
 Return ONLY: {{"doc_type": "<label>"}}"""
 
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        resp = client.chat.completions.create(
-            model=model,
-            response_format={"type": "json_object"},
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Classify this document. Look carefully for Indian document indicators (Hindi text, UIDAI logo, Income Tax Dept, Aadhaar number format, PAN format, etc.). Return {\"doc_type\": \"<label>\"}."},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ]},
-            ],
+        client = get_bedrock_client()
+        result = client.chat_json_with_image(
+            system=system,
+            user_text="Classify this document. Look carefully for Indian document indicators (Hindi text, UIDAI logo, Income Tax Dept, Aadhaar number format, PAN format, etc.). Return {\"doc_type\": \"<label>\"}.",
+            image_data=image_url,
+            temperature=0
         )
-        content = resp.choices[0].message.content
-        out = json.loads(content)
-        label = out.get("doc_type", "unknown")
+        
+        label = result.get("doc_type", "unknown")
         # Accept the label if it's in ROUTE_LABELS, otherwise try to map it
         if label in ROUTE_LABELS:
             return label
@@ -184,26 +116,16 @@ def extract_via_image(model: str, doc_type: str, image_url: str, prompts_by_type
         "\nReturn ONE JSON object only."
     )
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        resp = client.chat.completions.create(
-            model=model,
-            response_format={"type": "json_object"},
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Extract all structured data from this document image per the rules."},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ]},
-            ],
+        client = get_bedrock_client()
+        result = client.chat_json_with_image(
+            system=system,
+            user_text="Extract all structured data from this document image per the rules.",
+            image_data=image_url,
+            temperature=0
         )
-        content = resp.choices[0].message.content
-        try:
-            return remove_raw_text_fields(json.loads(content))
-        except Exception:
-            return {}
-    except Exception:
+        return remove_raw_text_fields(result)
+    except Exception as e:
+        print(f"[extract_via_image ERROR] {e}")
         return {}
 
 
@@ -316,7 +238,7 @@ def detect_visual_tampering(
     image_metadata: Dict[str, Any] = None
 ) -> Dict[str, Any]:
     """
-    Detect visual tampering indicators using GPT-4 Vision and metadata analysis.
+    Detect visual tampering indicators using Claude Vision and metadata analysis.
     
     Analyzes document image for:
     - Font inconsistencies
@@ -328,7 +250,7 @@ def detect_visual_tampering(
     - Metadata anomalies (EXIF tampering indicators)
     
     Args:
-        model: Model to use (e.g., "gpt-4o")
+        model: Model identifier (kept for API compatibility)
         image_url: URL or base64 data URI of the image
         doc_type: Document type (e.g., "aadhaar", "pan_card")
         extracted_fields: Extracted document fields for context
@@ -451,24 +373,13 @@ Look carefully at the document image and identify any visual inconsistencies, ed
 Consider both the visual appearance AND the metadata analysis above."""
 
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        
-        resp = client.chat.completions.create(
-            model=model,
-            response_format={"type": "json_object"},
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": [
-                    {"type": "text", "text": user_prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ]},
-            ],
+        client = get_bedrock_client()
+        result = client.chat_json_with_image(
+            system=system_prompt,
+            user_text=user_prompt,
+            image_data=image_url,
+            temperature=0
         )
-        
-        content = resp.choices[0].message.content
-        result = json.loads(content)
         
         # Ensure default values
         result.setdefault("tampering_detected", False)

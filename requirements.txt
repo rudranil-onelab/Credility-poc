@@ -2,12 +2,9 @@
 fastapi
 uvicorn[standard]
 
-# AWS Services
+# AWS Services (Bedrock for Claude, S3, Textract)
 boto3
 botocore
-
-# AI/LLM
-openai
 
 # File & Data Processing
 python-multipart

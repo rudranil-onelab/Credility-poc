@@ -15,7 +15,8 @@ import base64
 import io
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
-from openai import OpenAI
+
+from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
 
 
 def convert_pdf_to_images(file_path: str) -> List[str]:
@@ -137,7 +138,7 @@ def extract_knowledge_from_reference_image(
         - document_type: Detected document type
         - field_patterns: Dict of field names to expected patterns
     """
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = get_bedrock_client()
     
     # Prepare image URL
     if os.path.isfile(image_path_or_url):
@@ -158,6 +159,7 @@ def extract_knowledge_from_reference_image(
     
     system_prompt = """You are an expert document analyzer. Your task is to analyze this REFERENCE/TRAINING image 
 and extract detailed knowledge that can be used to validate similar documents in the future.
+IMPORTANT: Return ONLY valid JSON, no markdown or explanations.
 
 Analyze the document and extract:
 
@@ -205,35 +207,23 @@ Return your analysis as JSON:
     "knowledge_summary": "A paragraph summarizing everything learned that can be added to a validation prompt"
 }"""
 
-    user_content = [
-        {
-            "type": "text",
-            "text": f"""Analyze this REFERENCE document image and extract knowledge for future validation.
+    user_text = f"""Analyze this REFERENCE document image and extract knowledge for future validation.
 
 {f"User's validation intent: {user_prompt}" if user_prompt else ""}
 
 Extract all details about the document format, fields, and how to validate similar documents."""
-        },
-        {
-            "type": "image_url",
-            "image_url": {"url": image_url, "detail": "high"}
-        }
-    ]
     
     try:
-        print("[Knowledge Extraction] Analyzing reference image...")
+        print("[Knowledge Extraction] Analyzing reference image with Claude Vision...")
         
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ]
+        result = client.chat_json_with_image(
+            system=system_prompt,
+            user_text=user_text,
+            image_data=image_url,
+            temperature=0
         )
         
-        knowledge = json.loads(response.choices[0].message.content)
+        knowledge = result
         
         # Build enhanced prompt
         knowledge_text = knowledge.get("knowledge_summary", "")
@@ -295,7 +285,8 @@ Summary: {knowledge_text}
 
 def merge_knowledge_from_multiple_images(
     image_paths: List[str],
-    user_prompt: str
+    user_prompt: str,
+    per_image_contexts: List[str] = None
 ) -> Dict[str, Any]:
     """
     Extract knowledge from multiple reference images and merge into a single consolidated prompt.
@@ -304,10 +295,13 @@ def merge_knowledge_from_multiple_images(
     - Deduplication of repeated fields/rules across images
     - Resolution of contradictory information
     - Consolidation into a coherent validation prompt
+    - Per-image specific context (e.g., "name is beside photo" vs "name is below photo")
     
     Args:
         image_paths: List of paths to reference images (up to 5)
-        user_prompt: User's original validation description
+        user_prompt: User's original validation description (centralized rules)
+        per_image_contexts: Optional list of context/description for each image
+                           (e.g., ["Front of PAN - name beside photo", "Back of PAN - name below photo"])
     
     Returns:
         Dict with:
@@ -319,9 +313,16 @@ def merge_knowledge_from_multiple_images(
         - document_type: Detected document type
         - unique_fields: List of all unique fields found
     """
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = get_bedrock_client()
     
-    # Step 1: Extract knowledge from each image
+    # Ensure per_image_contexts is a list of same length as image_paths
+    if per_image_contexts is None:
+        per_image_contexts = [None] * len(image_paths)
+    elif len(per_image_contexts) < len(image_paths):
+        # Pad with None if not enough contexts provided
+        per_image_contexts = per_image_contexts + [None] * (len(image_paths) - len(per_image_contexts))
+    
+    # Step 1: Extract knowledge from each image with its SPECIFIC context
     per_image_knowledge = []
     successful_extractions = []
     
@@ -330,14 +331,23 @@ def merge_knowledge_from_multiple_images(
     for idx, image_path in enumerate(image_paths, start=1):
         print(f"[Multi-Image Training] Extracting knowledge from image {idx}/{len(image_paths)}: {os.path.basename(image_path)}")
         
+        # Build image-specific prompt with its own context
+        image_specific_prompt = user_prompt
+        image_context = per_image_contexts[idx - 1] if idx - 1 < len(per_image_contexts) else None
+        
+        if image_context:
+            image_specific_prompt = f"{user_prompt}\n\n📌 SPECIFIC CONTEXT FOR THIS IMAGE:\n{image_context}"
+            print(f"[Multi-Image Training] Image {idx} context: {image_context[:80]}...")
+        
         result = extract_knowledge_from_reference_image(
             image_path_or_url=image_path,
-            user_prompt=user_prompt
+            user_prompt=image_specific_prompt
         )
         
         per_image_knowledge.append({
             "image_index": idx,
             "image_path": os.path.basename(image_path),
+            "image_context": image_context,  # Store the specific context used
             "success": result.get("success", False),
             "knowledge": result.get("extracted_knowledge", ""),
             "document_type": result.get("document_type", "Unknown"),
@@ -349,6 +359,7 @@ def merge_knowledge_from_multiple_images(
         if result.get("success"):
             successful_extractions.append({
                 "index": idx,
+                "image_context": image_context,  # Include context in successful extractions
                 "knowledge": result.get("extracted_knowledge", ""),
                 "document_type": result.get("document_type", "Unknown"),
                 "fields": result.get("fields", []),
@@ -389,41 +400,82 @@ def merge_knowledge_from_multiple_images(
     # Step 2: Merge knowledge from multiple images using LLM
     print(f"[Multi-Image Training] Merging knowledge from {len(successful_extractions)} images...")
     
+    # Check if any user context was provided
+    has_user_context = any(ext.get('image_context') for ext in successful_extractions)
+    context_count = sum(1 for ext in successful_extractions if ext.get('image_context'))
+    
     merge_prompt = f"""You are a document analysis expert. You have been given knowledge extracted from {len(successful_extractions)} reference images of the same document type.
 
 Your task is to MERGE and CONSOLIDATE this knowledge into a SINGLE, coherent set of validation rules and field definitions.
 
 ═══════════════════════════════════════════════════════════════════════════════
-                         CRITICAL RULES FOR MERGING
+                    ⚠️ CRITICAL PRIORITY WEIGHTING SYSTEM ⚠️
+═══════════════════════════════════════════════════════════════════════════════
+
+When building the final consolidated knowledge, follow this STRICT priority order:
+
+{"**USER'S REFERENCE CONTEXT IS PROVIDED** - Apply these weights:" if has_user_context else "**NO USER CONTEXT PROVIDED** - Use 100% system analysis"}
+
+{'''
+📊 WEIGHT DISTRIBUTION:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  70% WEIGHT → USER'S REFERENCE CONTEXT (what user explicitly said)          │
+│              - This is the PRIMARY source of truth                          │
+│              - User's descriptions about each image are MOST IMPORTANT      │
+│              - Example: "No field labels present" or "Field labels present" │
+│              - Include these VERBATIM in layout variations                  │
+│                                                                             │
+│  30% WEIGHT → SYSTEM'S VISUAL ANALYSIS (auto-detected by AI)                │
+│              - Secondary information only                                   │
+│              - Positions, layouts detected automatically                    │
+│              - Only use to SUPPLEMENT user context, not replace it          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+🚨 IMPORTANT RULES:
+1. If user says "no field labels present" → This MUST appear in layout variations
+2. If user says "field labels are present" → This MUST appear in layout variations  
+3. User's exact words should be preserved in the output
+4. System-detected positions are SECONDARY to user's context
+5. When user context conflicts with system analysis, USER CONTEXT WINS
+''' if has_user_context else '''
+📊 WEIGHT DISTRIBUTION:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  100% WEIGHT → SYSTEM'S VISUAL ANALYSIS                                     │
+│               - Since no user context provided, use all detected info       │
+│               - Positions, layouts, field locations                         │
+│               - Visual characteristics observed                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+'''}
+
+═══════════════════════════════════════════════════════════════════════════════
+                         MERGING RULES
 ═══════════════════════════════════════════════════════════════════════════════
 
 1. **DEDUPLICATION**: 
    - If the same field appears in multiple images, include it ONLY ONCE
    - Merge field descriptions - take the most complete/detailed version
-   - Example: If Image 1 says "PAN: 10 chars" and Image 2 says "PAN Number: 10 alphanumeric, format AAAAA9999A"
-     → Use: "PAN Number: 10 alphanumeric characters, format AAAAA9999A"
 
 2. **CONTRADICTION RESOLUTION**: 
-   - If images have conflicting information (e.g., different date formats, different field requirements):
-     a) If one value appears more frequently across images, use that
-     b) If equal frequency, prefer the more specific/detailed version
-     c) If genuinely conflicting (e.g., "required" vs "optional"), note as contradiction
+   - If images have conflicting information:
+     a) USER CONTEXT always takes priority over system analysis
+     b) If both are user context, include BOTH as valid variations
    - Document ALL contradictions found with your resolution
 
 3. **FIELD CONSOLIDATION**:
-   - Same field with different names = ONE field (e.g., "DOB", "Date of Birth", "Birth Date" → "Date of Birth")
+   - Same field with different names = ONE field
    - Merge validation rules for the same field
-   - Keep the most comprehensive format pattern
 
 4. **VALIDATION RULES**:
    - Combine all unique validation rules from all images
    - Remove duplicate rules (same meaning, different wording)
-   - Keep rules that appear in majority of images as "required"
-   - Note rules that appear in only one image as "optional/additional"
 
-5. **ORGANIZATION**: 
-   - Group related fields together (personal info, document numbers, dates, etc.)
-   - List fields in logical order (most important first)
+5. **LAYOUT VARIATIONS** (MOST IMPORTANT):
+   - Each image's USER CONTEXT defines a valid layout variation
+   - Include user's EXACT descriptions as layout variant descriptions
+   - Example: If user said "no field labels present" for Image 1:
+     → Layout Variant 1: "No field labels present - values appear without labels like 'Name:', 'Father's Name:'"
+   - Example: If user said "field labels are present" for Image 2:
+     → Layout Variant 2: "Field labels are present - values appear with labels like 'Name:', 'Father's Name:'"
 
 ═══════════════════════════════════════════════════════════════════════════════
                     KNOWLEDGE FROM EACH REFERENCE IMAGE
@@ -432,19 +484,37 @@ Your task is to MERGE and CONSOLIDATE this knowledge into a SINGLE, coherent set
 """
     
     for extraction in successful_extractions:
+        # Include image-specific context PROMINENTLY if provided (70% weight)
+        image_context_section = ""
+        if extraction.get('image_context'):
+            image_context_section = f"""
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║  🎯 USER'S CONTEXT FOR THIS IMAGE (70% WEIGHT - PRIMARY SOURCE)               ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  {extraction['image_context']}
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+⚠️ IMPORTANT: The above user context MUST be included in layout_variations!
+   Use the user's EXACT description as the variant description.
+
+"""
+        else:
+            image_context_section = """
+[No user context provided for this image - use 100% system analysis]
+
+"""
+        
         merge_prompt += f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 IMAGE {extraction['index']} - Document Type: {extraction['document_type']}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{image_context_section}
+SYSTEM'S VISUAL ANALYSIS (30% WEIGHT - Secondary):
+- Fields Found: {json.dumps([f.get('name', 'Unknown') for f in extraction.get('fields', [])], ensure_ascii=False)}
+- Validation Tips: {json.dumps(extraction.get('validation_tips', [])[:3], ensure_ascii=False)}
 
-FIELDS FOUND:
-{json.dumps(extraction.get('fields', []), indent=2, ensure_ascii=False)}
-
-VALIDATION TIPS:
-{json.dumps(extraction.get('validation_tips', []), indent=2, ensure_ascii=False)}
-
-FULL KNOWLEDGE:
-{extraction['knowledge']}
+FULL KNOWLEDGE (for reference):
+{extraction['knowledge'][:500]}...
 
 """
     
@@ -495,23 +565,39 @@ Analyze all the knowledge above and return a JSON object with:
         "security_features": ["merged list of security features"]
     },
     
-    "consolidated_knowledge_summary": "A comprehensive paragraph summarizing ALL knowledge learned from ALL images. This should be detailed enough to validate future documents."
+    "layout_variations": [
+        {
+            "variant_name": "Descriptive name for this layout variant",
+            "user_context": "EXACT text from user's context for this image (REQUIRED if provided)",
+            "description": "Full description combining user context (70%) + system analysis (30%)",
+            "source_image": 1,
+            "distinguishing_features": ["Key features that identify this variant"],
+            "has_field_labels": true/false,
+            "notes": "Any additional notes about this variant"
+        }
+    ],
+    
+    "consolidated_knowledge_summary": "A comprehensive paragraph that MUST include: 1) All user-provided context about each image, 2) Layout variations with user's exact descriptions, 3) What makes each variant valid. The user's context should be prominently featured."
 }
+
+⚠️ CRITICAL REMINDER FOR layout_variations:
+- If user provided context for an image, that context MUST appear in the corresponding layout_variation
+- Use the user's EXACT words in the "user_context" and "description" fields
+- Example: If user said "no field labels present", include: "user_context": "no field labels present"
 
 Return ONLY valid JSON."""
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "You are an expert at analyzing and consolidating document validation rules from multiple reference images. Always return valid JSON. Be thorough in deduplication and contradiction resolution."},
-                {"role": "user", "content": merge_prompt}
-            ]
+        system_content = "You are an expert at analyzing and consolidating document validation rules from multiple reference images. Always return valid JSON. Be thorough in deduplication and contradiction resolution. IMPORTANT: Return ONLY valid JSON, no markdown or explanations."
+        
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": merge_prompt}],
+            system=system_content,
+            temperature=0
         )
         
-        merged_result = json.loads(response.choices[0].message.content)
+        content = strip_json_code_fences(response)
+        merged_result = json.loads(content)
         
         # Build the final consolidated knowledge string
         consolidated_knowledge = f"""
@@ -560,6 +646,38 @@ VISUAL CHARACTERISTICS:
    • Security Features: {', '.join(visual.get('security_features', []))}
 """
         
+        # Add layout variations if any - PRIORITIZE USER CONTEXT
+        layout_variations = merged_result.get("layout_variations", [])
+        if layout_variations:
+            consolidated_knowledge += "\n" + "="*70 + "\n"
+            consolidated_knowledge += "🎯 LAYOUT VARIATIONS (Accept ALL these layouts as valid):\n"
+            consolidated_knowledge += "="*70 + "\n"
+            for lv in layout_variations:
+                variant_name = lv.get('variant_name', f"Variant from Image {lv.get('source_image', '?')}")
+                user_context = lv.get('user_context', '')
+                has_labels = lv.get('has_field_labels')
+                
+                consolidated_knowledge += f"""
+   📋 {variant_name} (from Image {lv.get('source_image', '?')}):
+"""
+                # Prominently display user context if available (70% weight)
+                if user_context:
+                    consolidated_knowledge += f"""      🎯 USER'S DESCRIPTION: "{user_context}"
+"""
+                
+                # Add field labels info if available
+                if has_labels is not None:
+                    label_text = "Field labels ARE present (e.g., 'Name:', 'Father's Name:')" if has_labels else "Field labels are NOT present (values appear without labels)"
+                    consolidated_knowledge += f"""      📝 Field Labels: {label_text}
+"""
+                
+                consolidated_knowledge += f"""      📍 Description: {lv.get('description', 'N/A')}
+      ✓ Distinguishing features: {', '.join(lv.get('distinguishing_features', []))}
+"""
+                if lv.get('notes'):
+                    consolidated_knowledge += f"""      📌 Notes: {lv.get('notes')}
+"""
+        
         # Add contradiction notes if any
         contradictions = merged_result.get("contradictions", [])
         if contradictions:
@@ -579,10 +697,32 @@ SUMMARY:
 ═══════════════════════════════════════════════════════════════════════════════
 """
         
-        # Build final enhanced prompt
-        enhanced_prompt = f"""{user_prompt}
+        # Build final enhanced prompt with 60/40 weighting
+        # 60% weight to main description (user's validation rules)
+        # 40% weight to reference image learning
+        enhanced_prompt = f"""
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    📋 MAIN VALIDATION RULES (60% WEIGHT)                      ║
+║                    These are the PRIMARY validation criteria                  ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
 
-{consolidated_knowledge}"""
+{user_prompt}
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║              📚 REFERENCE IMAGE KNOWLEDGE (40% WEIGHT)                        ║
+║              Use this to understand document structure & variations           ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+{consolidated_knowledge}
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                         ⚠️ VALIDATION PRIORITY                                ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+1. FIRST: Check all conditions in MAIN VALIDATION RULES (60% weight)
+2. THEN: Use REFERENCE IMAGE KNOWLEDGE to understand valid document variations
+3. Accept documents that match ANY of the layout variations described above
+4. If a document matches a layout variation, it should NOT be failed for layout differences
+"""
         
         print(f"[Multi-Image Training] ✓ Successfully merged knowledge from {len(successful_extractions)} images")
         print(f"[Multi-Image Training] Found {len(unique_fields)} unique fields")
@@ -661,7 +801,7 @@ def extract_and_validate_generic(
         - doc_extracted_json: Only the fields user requested
         - reason: {pass_conditions, fail_conditions, user_questions, score_explanation}
     """
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = get_bedrock_client()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     
     system_prompt = f"""You are an expert document analyzer and validator.
@@ -830,33 +970,44 @@ REMEMBER:
 7. Combine data from ALL pages if multiple pages provided"""
     })
     
-    # Add all images (pages)
-    for idx, image_url in enumerate(image_urls):
-        user_content.append({
-            "type": "image_url",
-            "image_url": {"url": image_url, "detail": "high"}
-        })
-    
+    # Build user text with OCR data
+    user_text = f"""Analyze this document and follow my instructions:
+
+{user_prompt}
+
+REMEMBER:
+1. Extract ONLY the fields I mentioned (if I specified any)
+2. Validate EACH condition I mentioned separately
+3. Calculate score = (passed conditions / total conditions) × 100
+4. Answer my questions in user_questions section with "Q:" and "→ A:" format
+5. Explain why score is what it is in score_explanation
+6. Show actual values vs required values in pass/fail conditions"""
+
     if ocr_text:
-        user_content.append({
-            "type": "text",
-            "text": f"\nOCR Data (use for reference):\n{json.dumps(ocr_text, indent=2, ensure_ascii=False)[:3000]}"
-        })
+        user_text += f"\n\nOCR Data (use for reference):\n{json.dumps(ocr_text, indent=2, ensure_ascii=False)[:3000]}"
     
     try:
-        print(f"[Generic] Processing with GPT-4o Vision...")
+        print(f"[Generic] Processing with Claude Vision...")
         
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ]
-        )
+        # Use first image for vision analysis (Claude handles one image at a time)
+        # For multi-page documents, we concatenate OCR text
+        image_url = image_urls[0] if image_urls else None
         
-        result = json.loads(response.choices[0].message.content)
+        if image_url:
+            result = client.chat_json_with_image(
+                system=system_prompt + "\n\nIMPORTANT: Return ONLY valid JSON, no markdown or explanations.",
+                user_text=user_text,
+                image_data=image_url,
+                temperature=0
+            )
+        else:
+            # No image, use text-only
+            response = client.chat_completion(
+                messages=[{"role": "user", "content": user_text}],
+                system=system_prompt + "\n\nIMPORTANT: Return ONLY valid JSON, no markdown or explanations.",
+                temperature=0
+            )
+            result = json.loads(strip_json_code_fences(response))
         
         # Ensure proper structure
         result.setdefault("status", "fail")
@@ -1193,7 +1344,7 @@ def validate_with_llm(
     
     This function:
     1. Takes OCR text from AWS Textract
-    2. Sends to GPT-4 with user's validation prompt
+    2. Sends to Claude with user's validation prompt
     3. Returns extraction and validation results
     
     Args:
@@ -1204,7 +1355,7 @@ def validate_with_llm(
     Returns:
         Dict with status, score, doc_extracted_json, reason
     """
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = get_bedrock_client()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     
     # Build key-value pairs from Textract if available
@@ -1390,19 +1541,43 @@ Based on the document text above, extract the requested fields and validate agai
 Return your response as valid JSON."""
 
     try:
-        print(f"[LLM] Sending to GPT-4o for validation...")
+        print(f"[LLM] Sending to Claude for validation...")
         
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ],
-            response_format={"type": "json_object"},
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_message}],
+            system=system_prompt + "\n\nIMPORTANT: Return ONLY valid JSON, no markdown or explanations.",
             temperature=0
         )
         
-        result = json.loads(response.choices[0].message.content)
+        content = strip_json_code_fences(response)
+        result = json.loads(content)
+        
+        # ===== SCORE CORRECTION LOGIC =====
+        # Recalculate score from actual pass/fail conditions to fix LLM miscalculations
+        if isinstance(result.get("reason"), dict):
+            pass_conditions = result["reason"].get("pass_conditions", [])
+            fail_conditions = result["reason"].get("fail_conditions", [])
+            pass_count = len(pass_conditions)
+            fail_count = len(fail_conditions)
+            total_conditions = pass_count + fail_count
+            
+            if total_conditions > 0:
+                calculated_score = round((pass_count / total_conditions) * 100)
+                llm_score = int(result.get("score", 0))
+                
+                # If LLM score doesn't match calculated score, use calculated score
+                if calculated_score != llm_score:
+                    print(f"[LLM] Score mismatch detected: LLM said {llm_score}%, but {pass_count}/{total_conditions} conditions passed = {calculated_score}%")
+                    print(f"[LLM] Correcting score from {llm_score}% to {calculated_score}%")
+                    result["score"] = calculated_score
+                    result["reason"]["score_explanation"] = f"{pass_count} out of {total_conditions} conditions passed = {calculated_score}% score"
+            
+            # Ensure status matches score logic
+            if result["score"] == 100 and fail_count == 0:
+                result["status"] = "pass"
+            elif result["score"] < 100 or fail_count > 0:
+                result["status"] = "fail"
+        # ===== END SCORE CORRECTION =====
         
         print(f"[LLM] Validation complete - Status: {result.get('status')}, Score: {result.get('score')}")
         

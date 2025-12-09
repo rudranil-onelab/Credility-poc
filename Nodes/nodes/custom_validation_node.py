@@ -10,10 +10,9 @@ import json
 from datetime import datetime, timezone
 from typing import Dict, Any
 
-from openai import OpenAI
-
 from ..config.state_models import PipelineState
 from ..utils.helpers import log_agent_event
+from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
 
 
 def CustomValidation(state: PipelineState, user_prompt: str) -> Dict[str, Any]:
@@ -51,19 +50,8 @@ def CustomValidation(state: PipelineState, user_prompt: str) -> Dict[str, Any]:
     document_type = state.classification.detected_doc_type if state.classification else "unknown"
     document_name = state.ocr.document_name if state.ocr else None
     
-    # Get OpenAI client
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        result = {
-            "status": "error",
-            "score": 0,
-            "reason": ["OpenAI API key not configured"],
-            "checks": []
-        }
-        log_agent_event(state, "Custom Validation", "completed", {"status": "error", "reason": "no_api_key"})
-        return result
-    
-    client = OpenAI(api_key=api_key)
+    # Get Bedrock Claude client
+    client = get_bedrock_client()
     
     # Build system prompt with Indian document context
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -159,21 +147,20 @@ Return JSON result.
 """
 
     try:
-        print(f"[Custom Validation] Running validation with user prompt...")
+        print(f"[Custom Validation] Running validation with Claude via Bedrock...")
         print(f"[Custom Validation] Document type: {document_type}")
         print(f"[Custom Validation] Fields to validate: {list(extracted_fields.keys())}")
         
-        response = client.chat.completions.create(
-            model="gpt-4o",
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_message}],
+            system=system_prompt,
             temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ]
+            max_tokens=4096
         )
         
-        result = json.loads(response.choices[0].message.content)
+        # Parse JSON response
+        response = strip_json_code_fences(response)
+        result = json.loads(response)
         
         # Ensure required fields exist with defaults
         result.setdefault("status", "error")
@@ -372,13 +359,13 @@ def run_custom_validation_pipeline(
                     extracted_fields = result.get("doc_extracted_json", {})
                     
                     print(f"[TAMPERING] Document type: {doc_type}")
-                    print(f"[TAMPERING] Calling GPT-4 Vision for tampering analysis...")
+                    print(f"[TAMPERING] Calling Claude Vision for tampering analysis...")
                     
                     from ..tools.llm_services import detect_visual_tampering
                     
                     # Run tampering detection with metadata
                     tampering_result = detect_visual_tampering(
-                        model="gpt-4o",
+                        model="claude-3-5-haiku",  # Model param kept for API compatibility
                         image_url=image_url,
                         doc_type=doc_type,
                         extracted_fields=extracted_fields,

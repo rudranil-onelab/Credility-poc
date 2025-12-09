@@ -239,6 +239,125 @@ def generate_presigned_url_from_s3_uri(s3_uri: str, expiration: int = 3600) -> s
         return s3_uri
 
 
+def smart_merge_prompts(existing_prompt: str, new_prompt: str) -> Dict[str, Any]:
+    """
+    Intelligently merge existing and new prompts, handling contradictions and deduplication.
+    
+    This function uses LLM to:
+    1. Detect contradictions between old and new rules (new takes precedence)
+    2. Remove duplicate rules
+    3. Add new rules that don't exist
+    4. Remove rules if user explicitly says to remove them
+    5. Preserve unchanged rules
+    
+    Args:
+        existing_prompt: Current agent prompt stored in database
+        new_prompt: New prompt/changes from user
+    
+    Returns:
+        Dict with:
+        - merged_prompt: The final merged validation rules
+        - changes_made: List of changes (added/modified/removed)
+        - contradictions_resolved: List of contradictions and how they were resolved
+    """
+    from Nodes.tools.bedrock_client import get_bedrock_client, strip_json_code_fences
+    import json
+    
+    client = get_bedrock_client()
+    
+    system_prompt = """You are an expert at merging document validation rules intelligently.
+
+Given an EXISTING prompt and a NEW prompt from the user, create a MERGED prompt that:
+
+1. **HANDLES CONTRADICTIONS**: If new rules contradict existing rules, the NEW rules take precedence
+   - Example: Existing says "age > 18", New says "age > 21" → Use "age > 21"
+   - Example: Existing says "PAN must be present", New says "PAN is optional" → Use "PAN is optional"
+   
+2. **REMOVES DUPLICATES**: Don't repeat the same rule twice
+   - Example: Both say "PAN must be 10 chars" → Include only once
+   - Semantic duplicates count too: "name must be readable" and "name should be clearly visible" = same rule
+   
+3. **ADDS NEW RULES**: Include any new rules from the new prompt that don't exist in existing
+   
+4. **REMOVES DELETED RULES**: If user explicitly says "remove", "don't check", "skip", or "ignore" something, remove that rule entirely
+   - Example: New says "don't check age anymore" → Remove any age-related rules
+   
+5. **PRESERVES UNCHANGED RULES**: Keep existing rules that aren't contradicted, duplicated, or removed
+
+6. **MAINTAINS CLARITY**: The merged prompt should be clear, well-organized, and easy to understand
+
+Return JSON:
+{
+  "merged_prompt": "The final merged validation rules as a clear, organized prompt",
+  "changes_made": [
+    {"type": "added", "description": "description of what was added"},
+    {"type": "modified", "old_rule": "old rule text", "new_rule": "new rule text", "reason": "why it was changed"},
+    {"type": "removed", "description": "what was removed and why"}
+  ],
+  "contradictions_resolved": [
+    {"field": "field name", "existing_value": "old requirement", "new_value": "new requirement", "resolution": "used new value because user explicitly updated it"}
+  ]
+}
+
+IMPORTANT: 
+- The merged_prompt should be a complete, standalone validation prompt
+- Don't include meta-information in merged_prompt, just the actual validation rules
+- If new_prompt is a complete replacement (not incremental changes), just use new_prompt as merged_prompt"""
+
+    user_message = f"""EXISTING PROMPT (currently stored for this agent):
+---
+{existing_prompt}
+---
+
+NEW PROMPT FROM USER (changes/updates they want):
+---
+{new_prompt}
+---
+
+Analyze these prompts and create an intelligently merged result. Return JSON."""
+
+    try:
+        print(f"[Smart Merge] Merging prompts intelligently...")
+        print(f"[Smart Merge] Existing prompt length: {len(existing_prompt)} chars")
+        print(f"[Smart Merge] New prompt length: {len(new_prompt)} chars")
+        
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_message}],
+            system=system_prompt + "\n\nIMPORTANT: Return ONLY valid JSON, no markdown or explanations.",
+            temperature=0
+        )
+        
+        content = strip_json_code_fences(response)
+        result = json.loads(content)
+        
+        # Validate result structure
+        if "merged_prompt" not in result:
+            result["merged_prompt"] = new_prompt
+        if "changes_made" not in result:
+            result["changes_made"] = []
+        if "contradictions_resolved" not in result:
+            result["contradictions_resolved"] = []
+        
+        print(f"[Smart Merge] Merge complete:")
+        print(f"[Smart Merge]   - Changes made: {len(result['changes_made'])}")
+        print(f"[Smart Merge]   - Contradictions resolved: {len(result['contradictions_resolved'])}")
+        print(f"[Smart Merge]   - Merged prompt length: {len(result['merged_prompt'])} chars")
+        
+        return result
+        
+    except Exception as e:
+        print(f"[Smart Merge] Error during merge: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Fallback: just use new prompt (user's latest input takes precedence)
+        return {
+            "merged_prompt": new_prompt,
+            "changes_made": [{"type": "replaced", "description": f"Full replacement due to merge error: {str(e)}"}],
+            "contradictions_resolved": []
+        }
+
+
 # ==================== Pydantic Models ====================
 
 class CreateAgentRequest(BaseModel):
@@ -410,34 +529,50 @@ async def create_agent(
     request: Request,
     agent_name: str = Form(..., description="Unique agent identifier (lowercase, underscores)"),
     display_name: str = Form(..., description="Human-readable agent name"),
-    description: str = Form(..., description="Validation rules in natural language"),
-    OCR: bool = Form(default=True, description="OCR mode: true = OCR+LLM (Textract + GPT), false = LLM only"),
+    description: str = Form(..., description="Validation rules in natural language (REQUIRED - centralized description for all images)"),
+    OCR: bool = Form(default=True, description="OCR mode: true = OCR+LLM (Textract + Claude), false = LLM only"),
     tamper: bool = Form(default=False, description="Enable tampering detection (default: false)"),
     creator_id: Optional[str] = Form(None, description="Creator user ID"),
-    reference_images: List[UploadFile] = File(default=[], description="Optional: Up to 5 reference/training images to learn from and store")
+    # Individual image uploads with paired context descriptions
+    reference_1: Optional[UploadFile] = File(None, description="Reference image 1 (e.g., front of document)"),
+    reference_1_context: Optional[str] = Form(None, description="Context for reference_1 (e.g., 'Front side with photo and PAN number')"),
+    reference_2: Optional[UploadFile] = File(None, description="Reference image 2 (e.g., back of document)"),
+    reference_2_context: Optional[str] = Form(None, description="Context for reference_2 (e.g., 'Back side with address details')"),
+    reference_3: Optional[UploadFile] = File(None, description="Reference image 3"),
+    reference_3_context: Optional[str] = Form(None, description="Context for reference_3"),
+    reference_4: Optional[UploadFile] = File(None, description="Reference image 4"),
+    reference_4_context: Optional[str] = Form(None, description="Context for reference_4"),
+    reference_5: Optional[UploadFile] = File(None, description="Reference image 5"),
+    reference_5_context: Optional[str] = Form(None, description="Context for reference_5")
 ):
     """
     Create a new custom validation agent with OPTIONAL reference images (up to 5).
     
     **How it works:**
-    1. If reference_images are provided (up to 5):
+    1. If sample images are provided (up to 5):
        - Stores ALL images in S3 at: s3://{bucket}/custom_agents/reference_images/{agent_name}/
-       - Analyzes the FIRST image to extract knowledge (document type, fields, formats)
+       - Analyzes images to extract knowledge (document type, fields, formats)
        - Merges extracted knowledge into your description
        - Stores the ENHANCED description + image S3 URLs in database
        - Returns reference_images array with all S3 URLs
-    2. If no reference_images:
+    2. If no sample images:
        - Works with just the user description
        - Returns empty reference_images array
     
     **Form Data:**
     - agent_name: Unique identifier (lowercase, underscores allowed)
     - display_name: Human-readable name  
-    - description: Your validation rules in natural language
-    - OCR: true = OCR+LLM (Textract + GPT), false = LLM only (Vision API)
+    - description: (REQUIRED) Your validation rules in natural language - centralized description for all images
+    - OCR: true = OCR+LLM (Textract + Claude), false = LLM only (Vision API)
     - tamper: Enable tampering detection (default: false)
     - creator_id: (Optional) Your user ID
-    - reference_images: (Optional) Up to 5 example images of VALID documents
+    
+    **Reference Images (up to 5 pairs):**
+    - reference_1: First reference image file
+    - reference_1_context: Description/context for first image (e.g., "Front of PAN card with photo")
+    - reference_2: Second reference image file
+    - reference_2_context: Description/context for second image
+    - ... up to reference_5 / reference_5_context
     
     **Example without reference images:**
     ```
@@ -447,24 +582,21 @@ async def create_agent(
     tamper: false
     ```
     
-    **Example with reference images:**
+    **Example with paired reference images:**
     ```
     agent_name: pan_validator
     description: Pass if all fields are present and valid
     OCR: true
     tamper: true
-    reference_images: [upload valid_pan_card.png, upload sample_pan.jpg, ...]
+    reference_1: [upload front_pan.png]
+    reference_1_context: Front side showing PAN number, name, photo, and DOB
+    reference_2: [upload back_pan.png]
+    reference_2_context: Back side with address and signature
     ```
-    The system will:
-    - Store all images in S3
-    - Analyze the first image and learn:
-      - PAN format: AAAAA9999A
-      - Required fields: PAN, Name, Father's Name, DOB
-      - Date format: DD/MM/YYYY
     
     **Response includes:**
     - user_description: Your original description
-    - extracted_knowledge: Knowledge learned from first reference image (if provided)
+    - extracted_knowledge: Knowledge learned from reference images (if provided)
     - final_description: The complete description stored for the agent
     - reference_images: Array of S3 URLs where images are stored
     """
@@ -491,6 +623,26 @@ async def create_agent(
         if len(agent_name) > 100:
             raise HTTPException(status_code=400, detail="agent_name must be at most 100 characters")
         
+        # Collect reference images and their contexts into paired lists
+        reference_pairs = [
+            (reference_1, reference_1_context),
+            (reference_2, reference_2_context),
+            (reference_3, reference_3_context),
+            (reference_4, reference_4_context),
+            (reference_5, reference_5_context),
+        ]
+        
+        # Build reference_images list and per_image_descriptions from pairs
+        reference_images = []
+        per_image_descriptions = []
+        
+        for idx, (img, ctx) in enumerate(reference_pairs, start=1):
+            if img and img.filename:
+                reference_images.append(img)
+                per_image_descriptions.append(ctx)  # Can be None
+                if ctx:
+                    print(f"[Training] reference_{idx} has context: {ctx[:50]}...")
+        
         # Validate number of reference images
         if len(reference_images) > MAX_REFERENCE_IMAGES:
             raise HTTPException(
@@ -506,6 +658,11 @@ async def create_agent(
         unique_fields_found = []
         contradictions_resolved = []
         images_processed_count = 0
+        
+        # Log per-image descriptions count
+        if per_image_descriptions:
+            desc_count = len([d for d in per_image_descriptions if d])
+            print(f"[Training] Received {desc_count} per-image descriptions out of {len(per_image_descriptions)} images")
         
         # Process reference images if provided
         if reference_images and len(reference_images) > 0:
@@ -551,9 +708,16 @@ async def create_agent(
                     print(f"[Training] Extracting knowledge from single reference image")
                     
                     if extract_knowledge_from_reference_image:
+                        # Build prompt with per-image description if available
+                        combined_prompt = description
+                        if per_image_descriptions and len(per_image_descriptions) > 0 and per_image_descriptions[0]:
+                            img_desc = per_image_descriptions[0]
+                            combined_prompt = f"{description}\n\nImage-specific context: {img_desc}"
+                            print(f"[Training] Using per-image description: {img_desc}")
+                        
                         knowledge_result = extract_knowledge_from_reference_image(
                             image_path_or_url=temp_file_paths[0],
-                            user_prompt=description
+                            user_prompt=combined_prompt
                         )
                         
                         if knowledge_result.get("success"):
@@ -571,9 +735,14 @@ async def create_agent(
                     print(f"[Training] Extracting and merging knowledge from {len(temp_file_paths)} reference images")
                     
                     if merge_knowledge_from_multiple_images:
+                        # Pass per-image contexts directly to the merge function
+                        # Each image will receive ONLY its specific context
+                        print(f"[Training] Using {len([d for d in per_image_descriptions if d])} per-image descriptions")
+                        
                         merge_result = merge_knowledge_from_multiple_images(
                             image_paths=temp_file_paths,
-                            user_prompt=description
+                            user_prompt=description,  # Base description (centralized rules)
+                            per_image_contexts=per_image_descriptions  # Each image's specific context
                         )
                         
                         if merge_result.get("success"):
@@ -608,9 +777,14 @@ async def create_agent(
                         # Fallback to single image extraction if merge not available
                         print("[Training] Merge function not available, falling back to first image only")
                         if extract_knowledge_from_reference_image:
+                            # Build prompt with first image description if available
+                            fallback_prompt = description
+                            if per_image_descriptions and len(per_image_descriptions) > 0 and per_image_descriptions[0]:
+                                fallback_prompt = f"{description}\n\nImage-specific context: {per_image_descriptions[0]}"
+                            
                             knowledge_result = extract_knowledge_from_reference_image(
                                 image_path_or_url=temp_file_paths[0],
-                                user_prompt=description
+                                user_prompt=fallback_prompt
                             )
                             if knowledge_result.get("success"):
                                 final_description = knowledge_result["enhanced_prompt"]
@@ -630,7 +804,8 @@ async def create_agent(
             mode=mode,
             tamper_check=tamper,
             creator_id=creator_id,
-            reference_images=uploaded_s3_urls if uploaded_s3_urls else None
+            reference_images=uploaded_s3_urls if uploaded_s3_urls else None,
+            image_descriptions=per_image_descriptions if per_image_descriptions else None
         )
         
         # Build response message
@@ -731,33 +906,47 @@ async def update_agent(
     tamper: Optional[bool] = Form(None, description="Enable tampering detection"),
     is_active: Optional[bool] = Form(None, description="Enable/disable agent"),
     creator_id: Optional[str] = Form(None, description="Update creator ID"),
-    reference_images: List[UploadFile] = File(default=[], description="New reference images (replaces existing, up to 5)"),
-    append_images: bool = Form(default=False, description="If true, append new images to existing. If false, replace all.")
+    append_images: bool = Form(default=False, description="If true, append new images to existing. If false, replace all."),
+    # Individual image uploads with paired context descriptions
+    reference_1: Optional[UploadFile] = File(None, description="Reference image 1"),
+    reference_1_context: Optional[str] = Form(None, description="Context for reference_1"),
+    reference_2: Optional[UploadFile] = File(None, description="Reference image 2"),
+    reference_2_context: Optional[str] = Form(None, description="Context for reference_2"),
+    reference_3: Optional[UploadFile] = File(None, description="Reference image 3"),
+    reference_3_context: Optional[str] = Form(None, description="Context for reference_3"),
+    reference_4: Optional[UploadFile] = File(None, description="Reference image 4"),
+    reference_4_context: Optional[str] = Form(None, description="Context for reference_4"),
+    reference_5: Optional[UploadFile] = File(None, description="Reference image 5"),
+    reference_5_context: Optional[str] = Form(None, description="Context for reference_5")
 ):
     """
     Update an existing agent's configuration.
     
     **Form Data (all optional):**
     - **display_name**: Human-readable name
-    - **description**: Validation rules/prompt (will re-extract knowledge if reference_images provided)
-    - **OCR**: true = OCR+LLM (Textract + GPT), false = LLM only (Vision API)
+    - **description**: Validation rules/prompt (will re-extract knowledge if sample images provided)
+    - **OCR**: true = OCR+LLM (Textract + Claude), false = LLM only (Vision API)
     - **tamper**: Enable/disable tampering detection
     - **is_active**: Enable/disable agent
     - **creator_id**: Update creator ID
-    - **reference_images**: New reference images (up to 5 files)
     - **append_images**: If true, add to existing images. If false (default), replace all images.
     
-    **How reference_images update works:**
-    1. If `reference_images` provided and `append_images=false`:
+    **Reference Images (up to 5 pairs):**
+    - reference_1: First reference image file
+    - reference_1_context: Description/context for first image
+    - reference_2 / reference_2_context ... up to reference_5 / reference_5_context
+    
+    **How reference image update works:**
+    1. If reference images provided and `append_images=false`:
        - Old images are kept in S3 (not deleted)
        - New images are uploaded to S3
        - Knowledge is re-extracted from new images
        - Database is updated with new image URLs
-    2. If `reference_images` provided and `append_images=true`:
+    2. If reference images provided and `append_images=true`:
        - Existing images are preserved
        - New images are added (total max 5)
        - Knowledge is re-extracted from ALL images (existing + new)
-    3. If no `reference_images` provided:
+    3. If no reference images provided:
        - Only other fields are updated
        - Existing images remain unchanged
     
@@ -766,10 +955,13 @@ async def update_agent(
     OCR: false
     ```
     
-    **Example - Update prompt and add new reference images:**
+    **Example - Update prompt and add new reference images with context:**
     ```
     description: New validation rules here
-    reference_images: [file1.png, file2.jpg]
+    reference_1: [upload file1.png]
+    reference_1_context: Front of document with main details
+    reference_2: [upload file2.jpg]
+    reference_2_context: Back of document with signature
     append_images: false
     ```
     """
@@ -795,11 +987,60 @@ async def update_agent(
             mode = "ocr+llm" if OCR else "llm"
             updates_made.append(f"OCR mode → {'OCR+LLM' if OCR else 'LLM only'}")
         
+        # Collect reference images and their contexts into paired lists
+        reference_pairs = [
+            (reference_1, reference_1_context),
+            (reference_2, reference_2_context),
+            (reference_3, reference_3_context),
+            (reference_4, reference_4_context),
+            (reference_5, reference_5_context),
+        ]
+        
+        # Build reference_images list and per_image_descriptions from pairs
+        reference_images = []
+        per_image_descriptions = []
+        
+        for idx, (img, ctx) in enumerate(reference_pairs, start=1):
+            if img and img.filename:
+                reference_images.append(img)
+                per_image_descriptions.append(ctx)  # Can be None
+                if ctx:
+                    print(f"[Update] reference_{idx} has context: {ctx[:50]}...")
+        
+        # Log per-image descriptions count
+        if per_image_descriptions:
+            desc_count = len([d for d in per_image_descriptions if d])
+            print(f"[Update] Received {desc_count} per-image descriptions out of {len(per_image_descriptions)} images")
+        
         # Process reference images if provided
         new_reference_images = None
         extracted_knowledge = None
-        final_description = description  # Use provided description or None
+        final_description = None
         knowledge_extracted = False
+        smart_merge_result = None
+        
+        # Smart merge description if user provided a new one
+        if description:
+            existing_prompt = agent.get("prompt", "")
+            if existing_prompt and existing_prompt.strip():
+                # Use smart merge to intelligently combine existing and new prompts
+                print(f"[Update] Smart merging prompts...")
+                smart_merge_result = smart_merge_prompts(existing_prompt, description)
+                final_description = smart_merge_result.get("merged_prompt", description)
+                
+                # Log changes made
+                changes = smart_merge_result.get("changes_made", [])
+                contradictions = smart_merge_result.get("contradictions_resolved", [])
+                
+                if changes:
+                    updates_made.append(f"Smart merged prompt with {len(changes)} change(s)")
+                if contradictions:
+                    updates_made.append(f"Resolved {len(contradictions)} contradiction(s)")
+                    for c in contradictions:
+                        print(f"[Update] Contradiction resolved: {c.get('field', 'unknown')} - {c.get('resolution', '')}")
+            else:
+                # No existing prompt, just use new one
+                final_description = description
         
         if reference_images and len(reference_images) > 0 and reference_images[0].filename:
             # Filter out empty uploads
@@ -864,10 +1105,17 @@ async def update_agent(
                     if len(temp_file_paths) == 1 and not append_images:
                         # Single new image
                         if extract_knowledge_from_reference_image:
+                            # Build prompt with per-image description if available
+                            combined_prompt = base_description
+                            if per_image_descriptions and len(per_image_descriptions) > 0 and per_image_descriptions[0]:
+                                img_desc = per_image_descriptions[0]
+                                combined_prompt = f"{base_description}\n\nImage-specific context: {img_desc}"
+                                print(f"[Update] Using per-image description: {img_desc}")
+                            
                             print(f"[Update] Extracting knowledge from new reference image")
                             knowledge_result = extract_knowledge_from_reference_image(
                                 image_path_or_url=temp_file_paths[0],
-                                user_prompt=base_description
+                                user_prompt=combined_prompt
                             )
                             if knowledge_result.get("success"):
                                 final_description = knowledge_result["enhanced_prompt"]
@@ -877,10 +1125,15 @@ async def update_agent(
                     else:
                         # Multiple images - merge knowledge
                         if merge_knowledge_from_multiple_images:
+                            # Pass per-image contexts directly to the merge function
+                            # Each image will receive ONLY its specific context
+                            print(f"[Update] Using {len([d for d in per_image_descriptions if d])} per-image descriptions")
+                            
                             print(f"[Update] Merging knowledge from {len(temp_file_paths)} reference images")
                             merge_result = merge_knowledge_from_multiple_images(
                                 image_paths=temp_file_paths,
-                                user_prompt=base_description
+                                user_prompt=base_description,  # Base description (centralized rules)
+                                per_image_contexts=per_image_descriptions  # Each image's specific context
                             )
                             if merge_result.get("success"):
                                 final_description = merge_result["enhanced_prompt"]
@@ -896,7 +1149,8 @@ async def update_agent(
             mode=mode,
             tamper_check=tamper,
             is_active=is_active,
-            reference_images=new_reference_images
+            reference_images=new_reference_images,
+            image_descriptions=per_image_descriptions if per_image_descriptions else None
         )
         
         # Track other updates
@@ -924,13 +1178,23 @@ async def update_agent(
                 generate_presigned_url_from_s3_uri(img) for img in updated_agent["reference_images"]
             ]
         
-        return {
+        # Build response with smart merge details if applicable
+        response_data = {
             "success": True,
             "message": f"Agent '{agent_name}' updated successfully",
             "updates": updates_made,
             "knowledge_extracted": knowledge_extracted,
             "agent": updated_agent
         }
+        
+        # Add smart merge details if available
+        if smart_merge_result:
+            response_data["smart_merge"] = {
+                "changes_made": smart_merge_result.get("changes_made", []),
+                "contradictions_resolved": smart_merge_result.get("contradictions_resolved", [])
+            }
+        
+        return response_data
         
     except HTTPException:
         raise

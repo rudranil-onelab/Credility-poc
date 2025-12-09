@@ -12,9 +12,8 @@ import json
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 
-from openai import OpenAI
-
 from ..config.state_models import PipelineState, ExtractionState
+from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
 from ..utils.helpers import log_agent_event
 from ..utils.language_utils import (
     detect_languages, get_language_suffix, normalize_multilingual_fields,
@@ -641,7 +640,7 @@ def _fallback_extraction(normalized_input: Dict[str, Any], fields: list[str]) ->
 # ----------------------------------------------------------------------
 def extract_fields_with_gpt(input_json: Dict[str, Any], doc_type: str) -> Dict[str, Any]:
     """
-    Use GPT to strictly extract only the fields defined for the specific document type.
+    Use Claude to strictly extract only the fields defined for the specific document type.
     Ensures proper field extraction according to DOC_FIELDS for verification purposes.
     
     MULTI-LANGUAGE SUPPORT:
@@ -649,7 +648,7 @@ def extract_fields_with_gpt(input_json: Dict[str, Any], doc_type: str) -> Dict[s
     - Uses suffix convention: fieldName_LanguageCode (e.g., holderName_Hi, holderName_Ta)
     - Preserves original script text without translation
     """
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = get_bedrock_client()
     
     # Validate doc_type and get corresponding fields
     doc_type_key = (doc_type or "").lower()
@@ -754,18 +753,17 @@ For Indian documents, extract ALL language variants present in the document.
 Return ONLY a JSON object containing these fields: {fields}.
 For Indian documents, extract text in ALL scripts present (Hindi, Tamil, Telugu, etc.).
 Use language code suffixes: _Hi (Hindi), _Ta (Tamil), _Te (Telugu), _Bn (Bengali), etc.
-No extra fields, no comments, no explanations."""
+No extra fields, no comments, no explanations.
+IMPORTANT: Return ONLY valid JSON, no markdown or code fences."""
 
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            system=system_content,
+            temperature=0
         )
-        raw = json.loads(resp.choices[0].message.content)
+        
+        content = strip_json_code_fences(response)
+        raw = json.loads(content)
         
         # For Indian documents, allow additional language variant fields
         if is_indian_doc:

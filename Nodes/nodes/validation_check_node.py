@@ -831,20 +831,10 @@ def _generate_user_friendly_reason(
     This provides clear, actionable feedback for the frontend.
     """
     try:
-        from openai import OpenAI
+        from ..tools.bedrock_client import get_bedrock_client
         import json as _json
         
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            # Fallback to basic reason
-            if status == "pass":
-                return "Your document has been successfully verified. All validation checks passed."
-            elif status == "fail":
-                return "Document validation failed. Please upload a clear, valid document."
-            else:
-                return "Document requires manual review. Our team will verify it shortly."
-        
-        client = OpenAI(api_key=api_key)
+        client = get_bedrock_client()
         
         # Prepare context for AI
         context = {
@@ -911,16 +901,13 @@ Validation Context:
 
 Return EXACTLY 2 lines (under 75 characters each) that clearly explain the result to the user."""
 
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.3,  # Slight creativity for natural language
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_prompt}],
+            system=system_prompt,
+            temperature=0.3
         )
         
-        reason = resp.choices[0].message.content.strip()
+        reason = response.strip()
         
         # Ensure it's exactly 2 lines
         lines = [line.strip() for line in reason.split('\n') if line.strip()]
@@ -967,14 +954,10 @@ def _llm_validate_document(doc_type: str, extracted: Dict[str, Any]) -> Dict[str
     Use LLM to intelligently validate document fields including expiry, dates, and logical consistency.
     """
     try:
-        from openai import OpenAI
+        from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
         import json as _json
         
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            return {"validation_performed": False, "reason": "No API key"}
-        
-        client = OpenAI(api_key=api_key)
+        client = get_bedrock_client()
         
         # Get current date for expiry checks
         from datetime import datetime
@@ -1060,7 +1043,9 @@ Return JSON with:
   "warnings": ["list of warnings requiring human review"],
   "suggestions": ["list of actionable suggestions for user"],
   "summary": "brief overall summary of validation"
-}}"""
+}}
+
+IMPORTANT: Return ONLY valid JSON, no markdown or explanations."""
 
         user_prompt = f"""Validate this {doc_type} document:
 
@@ -1069,17 +1054,14 @@ Extracted Fields:
 
 Perform comprehensive validation and return detailed results."""
 
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            response_format={"type": "json_object"},
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_prompt}],
+            system=system_prompt,
+            temperature=0
         )
         
-        result = _json.loads(resp.choices[0].message.content)
+        content = strip_json_code_fences(response)
+        result = _json.loads(content)
         result["validation_performed"] = True
         
         print(f"\n[LLM VALIDATION] Overall Status: {result.get('overall_status')}")
@@ -1099,7 +1081,7 @@ def ValidationCheck(state: PipelineState) -> PipelineState:
     """
     Validate extracted document fields using intelligent LLM-based validation.
     
-    This node uses GPT-4o to comprehensively check:
+    This node uses Claude to comprehensively check:
     - Required field presence
     - Expiration dates (with context-aware thresholds)
     - Format validations (SSN, license numbers, etc.)
@@ -1161,7 +1143,7 @@ def ValidationCheck(state: PipelineState) -> PipelineState:
                 from ..tools.llm_services import detect_visual_tampering
                 
                 visual_tampering_result = detect_visual_tampering(
-                    model="gpt-4o",
+                    model="claude-3-5-haiku",  # Model param kept for API compatibility
                     image_url=image_url,
                     doc_type=doc_type or "unknown",
                     extracted_fields=extracted

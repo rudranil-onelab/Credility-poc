@@ -11,11 +11,15 @@ import json
 import time
 import re
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
-from openai import OpenAI
 import mysql.connector
 from mysql.connector import Error
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from Nodes.tools.bedrock_client import get_bedrock_client, strip_json_code_fences
 
 
 class CustomAgentService:
@@ -23,7 +27,7 @@ class CustomAgentService:
     
     def __init__(self, db_connection):
         self.db = db_connection
-        self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        self.client = get_bedrock_client()
     
     def create_agent(
         self,
@@ -33,7 +37,8 @@ class CustomAgentService:
         mode: str = "ocr+llm",
         tamper_check: bool = False,
         creator_id: str = None,
-        reference_images: List[str] = None
+        reference_images: List[str] = None,
+        image_descriptions: List[str] = None
     ) -> Dict[str, Any]:
         """
         Create a new custom validation agent.
@@ -46,9 +51,10 @@ class CustomAgentService:
             tamper_check: Enable tampering detection (default: False)
             creator_id: User who created this agent
             reference_images: List of S3 URLs for reference images (up to 5)
+            image_descriptions: List of per-image descriptions (optional)
         
         Returns:
-            Dict with agent_id, agent_name, endpoint, mode, tamper_check, reference_images
+            Dict with agent_id, agent_name, endpoint, mode, tamper_check, reference_images, image_descriptions
         """
         # Validate agent_name format (lowercase, numbers, underscores only)
         if not re.match(r'^[a-z0-9_]+$', agent_name):
@@ -112,6 +118,28 @@ class CustomAgentService:
                 print(f"[DB] Note: Could not add reference_images column: {e}")
                 pass  # Column may already exist or other issue
             
+            # Ensure image_descriptions column exists (add if missing)
+            try:
+                cursor.execute("""
+                    SELECT COUNT(*) 
+                    FROM information_schema.COLUMNS 
+                    WHERE TABLE_SCHEMA = DATABASE() 
+                    AND TABLE_NAME = 'tblcustom_agents' 
+                    AND COLUMN_NAME = 'image_descriptions'
+                """)
+                column_exists = cursor.fetchone()[0] > 0
+                
+                if not column_exists:
+                    cursor.execute("""
+                        ALTER TABLE tblcustom_agents 
+                        ADD COLUMN image_descriptions TEXT DEFAULT NULL
+                    """)
+                    self.db.commit()
+                    print("[DB] Added image_descriptions column to tblcustom_agents table")
+            except Exception as e:
+                print(f"[DB] Note: Could not add image_descriptions column: {e}")
+                pass  # Column may already exist or other issue
+            
             # Check if agent already exists
             cursor.execute(
                 "SELECT id FROM tblcustom_agents WHERE agent_name = %s",
@@ -123,15 +151,16 @@ class CustomAgentService:
             # Generate endpoint
             endpoint = f"/api/agent/{agent_name}/validate"
             
-            # Serialize reference_images to JSON string
+            # Serialize reference_images and image_descriptions to JSON strings
             reference_images_json = json.dumps(reference_images) if reference_images else None
+            image_descriptions_json = json.dumps(image_descriptions) if image_descriptions else None
             
-            # Insert new agent with tamper_check and reference_images
+            # Insert new agent with tamper_check, reference_images, and image_descriptions
             cursor.execute("""
                 INSERT INTO tblcustom_agents 
-                (agent_name, display_name, prompt, endpoint, mode, tamper_check, creator_id, is_active, total_hits, reference_images)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, 0, %s)
-            """, (agent_name, display_name, prompt, endpoint, mode, tamper_check, creator_id, reference_images_json))
+                (agent_name, display_name, prompt, endpoint, mode, tamper_check, creator_id, is_active, total_hits, reference_images, image_descriptions)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, 0, %s, %s)
+            """, (agent_name, display_name, prompt, endpoint, mode, tamper_check, creator_id, reference_images_json, image_descriptions_json))
             
             self.db.commit()
             agent_id = cursor.lastrowid
@@ -142,7 +171,8 @@ class CustomAgentService:
                 "endpoint": endpoint,
                 "mode": mode,
                 "tamper_check": tamper_check,
-                "reference_images": reference_images
+                "reference_images": reference_images,
+                "image_descriptions": image_descriptions
             }
         finally:
             cursor.close()
@@ -171,6 +201,14 @@ class CustomAgentService:
                         agent['reference_images'] = None
                 else:
                     agent['reference_images'] = None
+                # Parse image_descriptions JSON
+                if agent.get('image_descriptions'):
+                    try:
+                        agent['image_descriptions'] = json.loads(agent['image_descriptions'])
+                    except (json.JSONDecodeError, TypeError):
+                        agent['image_descriptions'] = None
+                else:
+                    agent['image_descriptions'] = None
             
             return agent
         finally:
@@ -199,6 +237,14 @@ class CustomAgentService:
                         agent['reference_images'] = None
                 else:
                     agent['reference_images'] = None
+                # Parse image_descriptions JSON
+                if agent.get('image_descriptions'):
+                    try:
+                        agent['image_descriptions'] = json.loads(agent['image_descriptions'])
+                    except (json.JSONDecodeError, TypeError):
+                        agent['image_descriptions'] = None
+                else:
+                    agent['image_descriptions'] = None
             
             return agent
         finally:
@@ -212,7 +258,8 @@ class CustomAgentService:
         mode: str = None,
         tamper_check: bool = None,
         is_active: bool = None,
-        reference_images: List[str] = None
+        reference_images: List[str] = None,
+        image_descriptions: List[str] = None
     ) -> bool:
         """Update an existing agent."""
         cursor = self.db.cursor()
@@ -247,6 +294,10 @@ class CustomAgentService:
             if reference_images is not None:
                 updates.append("reference_images = %s")
                 params.append(json.dumps(reference_images) if reference_images else None)
+            
+            if image_descriptions is not None:
+                updates.append("image_descriptions = %s")
+                params.append(json.dumps(image_descriptions) if image_descriptions else None)
             
             if not updates:
                 return False
@@ -384,17 +435,14 @@ Validate the document against ALL the user's rules above. Return JSON result.
 """
 
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                temperature=0,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ]
+            response = self.client.chat_completion(
+                messages=[{"role": "user", "content": user_message}],
+                system=system_prompt + "\n\nIMPORTANT: Return ONLY valid JSON, no markdown or explanations.",
+                temperature=0
             )
             
-            result = json.loads(response.choices[0].message.content)
+            content = strip_json_code_fences(response)
+            result = json.loads(content)
             
             # Ensure required fields exist
             result.setdefault("status", "error")

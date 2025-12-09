@@ -505,11 +505,9 @@ def _guess_identity_subtype_from_ocr(ocr_json: Dict[str, Any]) -> str:
 
     # LLM-based classification (comprehensive document type support)
     try:
-        from openai import OpenAI  # type: ignore
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            raise RuntimeError("no key")
-        client = OpenAI(api_key=api_key)
+        from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
+        
+        client = get_bedrock_client()
         
         # Comprehensive list of all supported identity document types
         allowed_types = [
@@ -530,7 +528,8 @@ def _guess_identity_subtype_from_ocr(ocr_json: Dict[str, Any]) -> str:
             "You are an expert classifier for U.S. and Indian identity documents. Return JSON only.\n"
             f"Supported document types: {', '.join(allowed_types)}\n"
             "Analyze the OCR data and classify the document to the most specific type.\n"
-            "Consider document layout, field names, issuing authorities, and content patterns."
+            "Consider document layout, field names, issuing authorities, and content patterns.\n"
+            "IMPORTANT: Return ONLY valid JSON, no markdown or explanations."
         )
         
         payload = {
@@ -539,20 +538,19 @@ def _guess_identity_subtype_from_ocr(ocr_json: Dict[str, Any]) -> str:
             "text_content_sample": text_blob[:500]  # First 500 chars for context
         }
         
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            response_format={"type": "json_object"},
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": (
-                    "Classify this U.S. identity document to one of the supported types. "
-                    "Respond as {\"subtype\":\"document_type\", \"confidence\":\"high|medium|low\", \"reasoning\":\"brief explanation\"}.\n"
-                    + str(payload)
-                )},
-            ],
+        user_message = (
+            "Classify this U.S. identity document to one of the supported types. "
+            "Respond as {\"subtype\":\"document_type\", \"confidence\":\"high|medium|low\", \"reasoning\":\"brief explanation\"}.\n"
+            + str(payload)
         )
-        content = resp.choices[0].message.content
+        
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_message}],
+            system=system,
+            temperature=0
+        )
+        
+        content = strip_json_code_fences(response)
         import json as _json
         result = _json.loads(content) or {}
         label = result.get("subtype", "other_identity")
@@ -576,20 +574,9 @@ def _generate_classification_failure_reason(message: str, doc_type: str, ingesti
     Generate a user-friendly 2-line reason for classification failure using AI.
     """
     try:
-        from openai import OpenAI
-        import json as _json
+        from ..tools.bedrock_client import get_bedrock_client
         
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            # Fallback to basic reason
-            if "mismatch" in message.lower():
-                return f"Document type mismatch detected.\nPlease upload the correct document type."
-            elif "expired" in message.lower():
-                return "Your document has expired.\nPlease upload a current, valid document."
-            else:
-                return "Document validation failed.\nPlease upload a clear, valid document."
-        
-        client = OpenAI(api_key=api_key)
+        client = get_bedrock_client()
         
         system_prompt = """You are a user experience expert who creates clear, friendly, and actionable messages for document verification failures.
 
@@ -631,16 +618,13 @@ Failure Message: {message}
 
 Return EXACTLY 2 lines (under 75 characters each) that clearly explain what went wrong and what the user should do."""
 
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.3,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_prompt}],
+            system=system_prompt,
+            temperature=0.3
         )
         
-        reason = resp.choices[0].message.content.strip()
+        reason = response.strip()
         
         # Ensure it's exactly 2 lines
         lines = [line.strip() for line in reason.split('\n') if line.strip()]
@@ -691,14 +675,10 @@ def _extract_actual_document_name_from_ocr(ocr_json: Dict[str, Any]) -> Dict[str
     
     # Use LLM for intelligent document analysis
     try:
-        from openai import OpenAI
+        from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
         import json as _json
         
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            return {"document_type": "Unknown Document", "confidence": "low", "reasoning": "No API key"}
-        
-        client = OpenAI(api_key=api_key)
+        client = get_bedrock_client()
         
         system_prompt = """You are an expert document classifier with deep knowledge of identity documents worldwide.
 
@@ -750,7 +730,9 @@ Return JSON with:
   "issuing_authority": "detected authority if any",
   "country": "detected country",
   "key_fields_found": ["list of key fields that helped identify"]
-}"""
+}
+
+IMPORTANT: Return ONLY valid JSON, no markdown or explanations."""
 
         user_prompt = f"""Analyze this OCR data and identify the document type:
 
@@ -758,17 +740,14 @@ Return JSON with:
 
 Provide detailed classification with confidence level and reasoning."""
 
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            response_format={"type": "json_object"},
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_prompt}],
+            system=system_prompt,
+            temperature=0
         )
         
-        result = _json.loads(resp.choices[0].message.content)
+        content = strip_json_code_fences(response)
+        result = _json.loads(content)
         print(f"[LLM CLASSIFICATION] Document: {result.get('document_type')}, Confidence: {result.get('confidence')}")
         print(f"[LLM CLASSIFICATION] Reasoning: {result.get('reasoning')}")
         
@@ -933,14 +912,12 @@ def Classification(state: PipelineState) -> PipelineState:
         if confidence in ["medium", "high"] and actual_document_name != "Unknown Document":
             # Use LLM to check if documents match
             try:
-                from openai import OpenAI
+                from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
                 import json as _json
                 
-                api_key = os.environ.get("OPENAI_API_KEY", "")
-                if api_key:
-                    client = OpenAI(api_key=api_key)
-                    
-                    match_prompt = f"""Compare these two document types and determine if they match:
+                client = get_bedrock_client()
+                
+                match_prompt = f"""Compare these two document types and determine if they match:
 
 Claimed Document: "{ingestion_name}"
 Detected Document: "{actual_document_name}"
@@ -959,42 +936,41 @@ Return JSON:
   "is_match": true/false,
   "confidence": "high|medium|low",
   "reasoning": "explanation of why they match or don't match"
-}}"""
+}}
 
-                    resp = client.chat.completions.create(
-                        model="gpt-4o",
-                        response_format={"type": "json_object"},
-                        temperature=0,
-                        messages=[
-                            {"role": "system", "content": "You are an expert at comparing document types and identifying matches, considering variations, abbreviations, and regional differences."},
-                            {"role": "user", "content": match_prompt}
-                        ]
+IMPORTANT: Return ONLY valid JSON, no markdown or explanations."""
+
+                system_prompt = "You are an expert at comparing document types and identifying matches, considering variations, abbreviations, and regional differences. Return ONLY valid JSON."
+                
+                response = client.chat_completion(
+                    messages=[{"role": "user", "content": match_prompt}],
+                    system=system_prompt,
+                    temperature=0
+                )
+                
+                content = strip_json_code_fences(response)
+                match_result = _json.loads(content)
+                is_valid_match = match_result.get("is_match", False)
+                match_confidence = match_result.get("confidence", "low")
+                match_reasoning = match_result.get("reasoning", "")
+                
+                print(f"[LLM MATCH] Is Match: {is_valid_match}, Confidence: {match_confidence}")
+                print(f"[LLM MATCH] Reasoning: {match_reasoning}")
+                
+                # Only flag mismatch if LLM is confident it's not a match
+                if not is_valid_match and match_confidence in ["high", "medium"]:
+                    actual_document_mismatch = True
+                    detailed_reason = (
+                        f"Document content mismatch: You specified '{ingestion_name}' but the uploaded "
+                        f"document appears to be a '{actual_document_name}'. "
+                        f"Analysis: {match_reasoning}. "
+                        f"Please upload the correct document type or update the document name to match the uploaded file."
                     )
-                    
-                    match_result = _json.loads(resp.choices[0].message.content)
-                    is_valid_match = match_result.get("is_match", False)
-                    match_confidence = match_result.get("confidence", "low")
-                    match_reasoning = match_result.get("reasoning", "")
-                    
-                    print(f"[LLM MATCH] Is Match: {is_valid_match}, Confidence: {match_confidence}")
-                    print(f"[LLM MATCH] Reasoning: {match_reasoning}")
-                    
-                    # Only flag mismatch if LLM is confident it's not a match
-                    if not is_valid_match and match_confidence in ["high", "medium"]:
-                        actual_document_mismatch = True
-                        detailed_reason = (
-                            f"Document content mismatch: You specified '{ingestion_name}' but the uploaded "
-                            f"document appears to be a '{actual_document_name}'. "
-                            f"Analysis: {match_reasoning}. "
-                            f"Please upload the correct document type or update the document name to match the uploaded file."
-                        )
-                        print(f"[ERROR] Document content mismatch: Claimed '{ingestion_name}' vs Actual '{actual_document_name}'")
-                    else:
-                        # LLM validated the match successfully
-                        llm_validated = True
-                        print(f"[✓] LLM validated document match successfully")
+                    print(f"[ERROR] Document content mismatch: Claimed '{ingestion_name}' vs Actual '{actual_document_name}'")
                 else:
-                    print("[WARN] No OpenAI API key, skipping LLM document matching")
+                    # LLM validated the match successfully
+                    llm_validated = True
+                    print(f"[✓] LLM validated document match successfully")
                     
             except Exception as e:
                 print(f"[WARN] LLM document matching failed: {e}")

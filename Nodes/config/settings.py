@@ -16,9 +16,19 @@ if AWS_REGION != "us-east-1":
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 
-# OpenAI Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+# AWS Bedrock Configuration (Claude 3.5 Sonnet v2 for Vision support)
+# Note: Claude 3.5 Haiku does NOT support vision/images - only text
+# Claude 3.5 Sonnet v2 supports both text and vision
+BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")  # Use us-east-1 for best model availability
+#BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20240620-v1:0")
+
+# Alternative models with vision support:
+# - anthropic.claude-3-5-sonnet-20241022-v2:0 (Claude 3.5 Sonnet v2 - recommended)
+# - anthropic.claude-3-sonnet-20240229-v1:0 (Claude 3 Sonnet)
+# - anthropic.claude-3-haiku-20240307-v1:0 (Claude 3 Haiku - has vision, cheaper)
+# Text-only models (NO vision):
+# - anthropic.claude-3-5-haiku-20241022-v1:0 (Claude 3.5 Haiku - text only!)
 
 # S3 Configuration - POC bucket for Textract
 S3_BUCKET = os.getenv("S3_BUCKET", "lendingwise-poc")

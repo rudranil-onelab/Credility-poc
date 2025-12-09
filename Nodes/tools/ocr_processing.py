@@ -7,7 +7,7 @@ import json
 
 from ..tools.aws_services import run_textract_async_s3, run_analyze_id_s3, generate_presigned_url
 from ..tools.llm_services import chat_json, classify_via_image, extract_via_image, remove_raw_text_fields
-from ..config.settings import OPENAI_MODEL, ROUTE_LABELS
+from ..config.settings import BEDROCK_MODEL_ID, ROUTE_LABELS
 
 
 def group_blocks_by_page(blocks: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
@@ -136,7 +136,7 @@ def llm_route_from_ocr_page(page_view: Dict[str, Any]) -> str:
         "- Only output a JSON object; no extra text."
     )
 
-    out = chat_json(OPENAI_MODEL, system, payload) or {}
+    out = chat_json(BEDROCK_MODEL_ID, system, payload) or {}
     label = out.get("doc_type", "unknown")
     return label if label in ROUTE_LABELS else "unknown"
 
