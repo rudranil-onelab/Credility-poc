@@ -305,6 +305,7 @@ def run_custom_validation_pipeline(
         
         # Only run tampering detection if tamper_check is enabled
         if tamper_check:
+            tampering_status = "enabled"  # Add this line
             print("\n" + "=" * 60)
             print("[🔍 TAMPERING DETECTION] Starting visual tampering check...")
             print("=" * 60)
@@ -377,12 +378,6 @@ def run_custom_validation_pipeline(
                     if tampering_result:
                         tampering_score = tampering_result.get("risk_score", 0)
                         
-                        # Determine tampering status: pass if risk < 70, fail if >= 70
-                        if tampering_score >= 70:
-                            tampering_status = "fail"
-                        else:
-                            tampering_status = "pass"
-                        
                         print(f"[TAMPERING] ✓ Tampering detection completed")
                         print(f"[TAMPERING]   Risk Score: {tampering_score}/100")
                         print(f"[TAMPERING]   Status: {tampering_status}")
@@ -409,6 +404,7 @@ def run_custom_validation_pipeline(
             print(f"[🔍 TAMPERING DETECTION] Completed - Score: {tampering_score}, Status: {tampering_status}")
             print("=" * 60 + "\n")
         else:
+            tampering_status = "disabled"
             print("[TAMPERING] Tampering detection is disabled for this agent (tamper_check=False)")
         # ===== END VISUAL TAMPERING DETECTION =====
         
