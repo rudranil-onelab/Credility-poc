@@ -7,8 +7,116 @@ identities, document numbers, and key information across main and supporting doc
 
 import json
 import time
-from typing import Dict, Any, List, Optional
+import base64
+from typing import Dict, Any, List, Optional, Tuple
 from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
+
+
+def pdf_to_image_base64(pdf_path: str) -> Tuple[str, str]:
+    """
+    Convert PDF to image (first page) and return base64 encoded data.
+    
+    Args:
+        pdf_path: Path to the PDF file
+    
+    Returns:
+        Tuple of (base64_data, media_type)
+    """
+    try:
+        from pdf2image import convert_from_path
+        from PIL import Image
+        import io
+        
+        # Convert first page of PDF to image
+        images = convert_from_path(pdf_path, first_page=1, last_page=1)
+        
+        if not images:
+            raise Exception("Failed to convert PDF to image")
+        
+        # Get first page
+        img = images[0]
+        
+        # Convert to JPEG format in memory
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=95)
+        buffer.seek(0)
+        
+        # Encode to base64
+        image_data = base64.b64encode(buffer.read()).decode('utf-8')
+        
+        return image_data, 'image/jpeg'
+        
+    except ImportError:
+        print("[PDF Conversion] pdf2image not installed. Attempting alternative method...")
+        # Fallback to PyMuPDF if available
+        try:
+            import fitz  # PyMuPDF
+            import io
+            from PIL import Image
+            
+            doc = fitz.open(pdf_path)
+            page = doc[0]  # First page
+            
+            # Render page to image (higher resolution for better quality)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better quality
+            
+            # Convert to PIL Image
+            img_data = pix.tobytes("png")
+            img = Image.open(io.BytesIO(img_data))
+            
+            # Convert to JPEG
+            buffer = io.BytesIO()
+            img.convert('RGB').save(buffer, format='JPEG', quality=95)
+            buffer.seek(0)
+            
+            # Encode to base64
+            image_data = base64.b64encode(buffer.read()).decode('utf-8')
+            
+            doc.close()
+            
+            return image_data, 'image/jpeg'
+            
+        except ImportError:
+            raise Exception("PDF conversion requires pdf2image or PyMuPDF (fitz) library. Please install with: pip install pdf2image or pip install PyMuPDF")
+    except Exception as e:
+        raise Exception(f"Failed to convert PDF to image: {str(e)}")
+
+
+def encode_image_to_base64(file_path: str) -> Tuple[str, str]:
+    """
+    Encode an image file to base64. Converts PDFs to images first.
+    
+    Args:
+        file_path: Path to the image/PDF file
+    
+    Returns:
+        Tuple of (base64_data, media_type)
+    """
+    import os
+    
+    # Determine media type from file extension
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    # Handle PDFs - convert to image first
+    if ext == '.pdf':
+        print(f"[Image Encoding] Converting PDF to image for Claude vision API...")
+        return pdf_to_image_base64(file_path)
+    
+    # Handle image files directly
+    media_type_map = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp'
+    }
+    media_type = media_type_map.get(ext, 'image/jpeg')
+    
+    # Read and encode file
+    with open(file_path, 'rb') as f:
+        image_data = base64.b64encode(f.read()).decode('utf-8')
+    
+    return image_data, media_type
 
 
 def extract_identifiable_fields(extracted_json: Dict[str, Any], document_type: str) -> Dict[str, Any]:
@@ -83,17 +191,20 @@ def run_agentic_cross_validation_pipeline(
     Run agentic cross-document validation by cross-validating the main document with supporting documents.
     
     This function:
-    1. Extracts identifiable fields from main and supporting documents
-    2. Uses Claude LLM to perform intelligent cross-validation
+    1. Sends main document image + supporting document images directly to Claude
+    2. Uses Claude's vision capabilities to analyze all documents together
     3. Detects inconsistencies, contradictions, and potential fraud
     4. Provides detailed reports on each validation check
     
+    NOTE: Supporting documents are sent as raw images WITHOUT OCR to improve accuracy.
+    PDFs are automatically converted to images.
+    
     Args:
         main_file_path: Path to main document file
-        main_extracted_json: Extracted fields from main document
+        main_extracted_json: Extracted fields from main document (from main validation)
         main_document_type: Type of main document
         supporting_file_paths: List of paths to supporting document files
-        supporting_extracted_jsons: List of extracted fields from supporting documents
+        supporting_extracted_jsons: List of extracted fields from supporting documents (may be empty)
         supporting_document_types: List of document types for supporting documents
         user_prompt: User's validation rules
         mode: Processing mode ('ocr+llm' or 'llm')
@@ -114,25 +225,16 @@ def run_agentic_cross_validation_pipeline(
     start_time = time.time()
     
     print(f"\n{'='*70}")
-    print(f"[AGENTIC CROSS VALIDATION] Starting cross-validation")
+    print(f"[AGENTIC CROSS VALIDATION] Starting cross-validation with DIRECT IMAGE ANALYSIS")
     print(f"[AGENTIC CROSS VALIDATION] Main document: {main_document_type}")
-    print(f"[AGENTIC CROSS VALIDATION] Supporting documents: {len(supporting_extracted_jsons)}")
+    print(f"[AGENTIC CROSS VALIDATION] Supporting documents: {len(supporting_file_paths)}")
+    print(f"[AGENTIC CROSS VALIDATION] Mode: Sending raw images directly to Claude (NO OCR)")
+    print(f"[AGENTIC CROSS VALIDATION] PDFs will be automatically converted to images")
     if cross_validation_prompt:
         print(f"[AGENTIC CROSS VALIDATION] Custom prompt: {cross_validation_prompt[:80]}...")
     print(f"{'='*70}\n")
     
     try:
-        # Extract identifiable fields from all documents
-        print("[AGENTIC CROSS VALIDATION] Extracting identifiable fields...")
-        
-        main_fields = extract_identifiable_fields(main_extracted_json, main_document_type)
-        supporting_fields = []
-        
-        for i, (extracted_json, doc_type) in enumerate(zip(supporting_extracted_jsons, supporting_document_types)):
-            supporting_fields.append(extract_identifiable_fields(extracted_json, doc_type))
-            desc = supporting_descriptions[i] if supporting_descriptions and i < len(supporting_descriptions) else "No description"
-            print(f"[AGENTIC CROSS VALIDATION]   - Document {i+1}: {doc_type} ({desc})")
-        
         # Get Claude client for LLM analysis
         client = get_bedrock_client()
         
@@ -142,6 +244,8 @@ def run_agentic_cross_validation_pipeline(
         system_prompt = """You are an expert in agentic cross-document validation and consistency analysis with deep knowledge of Indian documents and cross-document validation.
 
 Your task is to perform intelligent cross-validation across multiple documents to detect potential fraud or inconsistencies.
+
+IMPORTANT: You are receiving the ACTUAL DOCUMENT IMAGES. Analyze them directly without relying on pre-extracted data.
 
 AGENTIC CROSS VALIDATION PRINCIPLES:
 1. **Identity Consistency**: All documents should refer to the SAME person
@@ -177,17 +281,16 @@ AGENTIC CROSS VALIDATION PRINCIPLES:
 
 Return JSON with detailed cross-validation results."""
 
-        # Build supporting documents JSON with descriptions
-        supporting_docs_data = []
-        for i, f in enumerate(supporting_fields):
-            doc_data = {
-                "document_index": i,
-                "type": f.get("document_type"),
-                "fields": f.get("extracted_fields")
+        # Prepare supporting documents descriptions
+        supporting_docs_descriptions = []
+        for i in range(len(supporting_file_paths)):
+            desc = {
+                "document_index": i + 1,
+                "type": supporting_document_types[i] if i < len(supporting_document_types) else "Unknown"
             }
             if supporting_descriptions and i < len(supporting_descriptions):
-                doc_data["user_description"] = supporting_descriptions[i]
-            supporting_docs_data.append(doc_data)
+                desc["user_description"] = supporting_descriptions[i]
+            supporting_docs_descriptions.append(desc)
 
         # Build custom validation instructions section
         custom_validation_section = ""
@@ -201,20 +304,23 @@ IMPORTANT: Apply these custom instructions during your cross-validation analysis
 These instructions should guide your validation logic and risk assessment.
 """
 
-        user_message = f"""Please perform agentic cross-document validation analysis:
+        # Build main document context (from OCR extraction)
+        main_fields = extract_identifiable_fields(main_extracted_json, main_document_type)
 
-MAIN DOCUMENT TYPE: {main_document_type}
-MAIN DOCUMENT FIELDS:
-{json.dumps(main_fields, indent=2, ensure_ascii=False)}
+        user_text = f"""Please perform agentic cross-document validation analysis on the images provided.
 
-SUPPORTING DOCUMENTS ({len(supporting_fields)} total):
-{json.dumps(supporting_docs_data, indent=2, ensure_ascii=False)}
+MAIN DOCUMENT (Image 1):
+- Type: {main_document_type}
+- Previously extracted key fields (for context): {json.dumps(main_fields.get('extracted_fields', {}), indent=2, ensure_ascii=False)}
+
+SUPPORTING DOCUMENTS (Images 2-{len(supporting_file_paths) + 1}):
+{json.dumps(supporting_docs_descriptions, indent=2, ensure_ascii=False)}
 
 USER'S MAIN DOCUMENT VALIDATION RULES:
 {user_prompt}
 {custom_validation_section}
 
-Perform the following analysis:
+Perform the following analysis BY EXAMINING THE ACTUAL DOCUMENT IMAGES:
 
 1. **Identity Verification**: Are all documents about the SAME person?
    - Check name consistency (allow spelling variations)
@@ -308,6 +414,7 @@ Return ONLY valid JSON with this structure:
 }}
 
 IMPORTANT:
+- Analyze the ACTUAL IMAGES provided, not just the extracted fields
 - Be thorough in your analysis
 - Flag even minor inconsistencies that could indicate fraud or cross-document risk
 - Consider document relationships (what documents should contain)
@@ -316,10 +423,63 @@ IMPORTANT:
 - Do NOT approve documents with critical contradictions
 - Return ONLY valid JSON"""
 
-        print("[AGENTIC CROSS VALIDATION] Sending to Claude for analysis...")
+        print("[AGENTIC CROSS VALIDATION] Encoding images for Claude...")
         
+        # Encode main document image
+        main_image_data = None
+        main_media_type = None
+        try:
+            main_image_data, main_media_type = encode_image_to_base64(main_file_path)
+            print(f"[AGENTIC CROSS VALIDATION] Main document encoded: {main_media_type}")
+        except Exception as e:
+            print(f"[AGENTIC CROSS VALIDATION] Warning: Could not encode main document: {e}")
+        
+        # Encode supporting document images
+        supporting_images = []
+        for i, file_path in enumerate(supporting_file_paths):
+            try:
+                image_data, media_type = encode_image_to_base64(file_path)
+                supporting_images.append((image_data, media_type))
+                print(f"[AGENTIC CROSS VALIDATION] Supporting document {i+1} encoded: {media_type}")
+            except Exception as e:
+                print(f"[AGENTIC CROSS VALIDATION] Warning: Could not encode supporting document {i+1}: {e}")
+        
+        # Build message content with all images
+        message_content = []
+        
+        # Add main document image first
+        if main_image_data:
+            message_content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": main_media_type,
+                    "data": main_image_data
+                }
+            })
+        
+        # Add all supporting document images
+        for image_data, media_type in supporting_images:
+            message_content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": image_data
+                }
+            })
+        
+        # Add text prompt
+        message_content.append({
+            "type": "text",
+            "text": user_text
+        })
+        
+        print(f"[AGENTIC CROSS VALIDATION] Sending {len(message_content) - 1} images to Claude for analysis...")
+        
+        # Send to Claude with all images
         response = client.chat_completion(
-            messages=[{"role": "user", "content": user_message}],
+            messages=[{"role": "user", "content": message_content}],
             system=system_prompt,
             temperature=0,
             max_tokens=8192
