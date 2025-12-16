@@ -1570,8 +1570,8 @@ async def validate_document_with_supporting(
     Validate a main document with supporting documents using agentic cross validation.
     
     This endpoint:
-    1. Validates the main document against agent's rules
-    2. Extracts data from each supporting document (using generic extraction prompt)
+    1. Validates the main document against agent's rules (with OCR)
+    2. Sends supporting documents DIRECTLY to Claude as images (NO OCR)
     3. Performs cross-validation across all documents (agentic cross validation)
     4. Checks for inconsistencies and potential cross document errors
     5. Returns comprehensive results
@@ -1586,7 +1586,7 @@ async def validate_document_with_supporting(
     
     **Returns:**
     - **main_document**: Validation result for main document
-    - **supporting_documents**: Extraction results for each supporting document
+    - **supporting_documents**: Basic info for each supporting document (NO extraction, sent directly to Claude)
     - **agentic_cross_validation**: Cross-validation results and cross-document risk analysis
     - **overall_status**: "pass" or "fail"
     - **overall_message**: Summary of results
@@ -1645,6 +1645,7 @@ async def validate_document_with_supporting(
         
         print(f"\n{'='*70}")
         print(f"[API] Processing document validation with agentic cross validation")
+        print(f"[API] Mode: Supporting documents sent DIRECTLY to Claude (NO OCR)")
         print(f"[API] Agent: {agent_name}")
         print(f"[API] Main document: {main_file.filename}")
         print(f"[API] Supporting documents: {len(supporting_files)}")
@@ -1654,7 +1655,7 @@ async def validate_document_with_supporting(
             print(f"[API]   - Supporting doc {idx+1}: {desc}")
         print(f"{'='*70}\n")
         
-        # Process main document with agent's specific prompt
+        # Process main document with agent's specific prompt (WITH OCR)
         from Nodes.nodes.custom_validation_node import run_custom_validation_pipeline
         
         temp_main = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(main_file.filename)[1])
@@ -1663,7 +1664,7 @@ async def validate_document_with_supporting(
         temp_main.close()
         temp_files.append(temp_main.name)
         
-        print(f"[API] Running main document validation with agent-specific prompt...")
+        print(f"[API] Running main document validation with agent-specific prompt (WITH OCR)...")
         main_result = run_custom_validation_pipeline(
             file_path=temp_main.name,
             user_prompt=agent['prompt'],  # Agent-specific prompt for main doc
@@ -1671,14 +1672,14 @@ async def validate_document_with_supporting(
             tamper_check=agent.get('tamper_check', False)
         )
         
-        # Process supporting documents with GENERIC extraction prompt
+        # Save supporting documents to temp files (NO OCR - just save files)
         supporting_results = []
         supporting_temp_files = []
         
-        print(f"[API] Processing supporting documents with generic extraction prompt...")
+        print(f"[API] Saving supporting documents for direct image analysis (NO OCR)...")
         
         for idx, supp_file in enumerate(supporting_files):
-            print(f"[API] Extracting data from supporting document {idx+1}: {supp_file.filename}")
+            print(f"[API] Saving supporting document {idx+1}: {supp_file.filename}")
             
             temp_supp = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(supp_file.filename)[1])
             supp_content = await supp_file.read()
@@ -1687,26 +1688,19 @@ async def validate_document_with_supporting(
             temp_files.append(temp_supp.name)
             supporting_temp_files.append(temp_supp.name)
             
-            # Use GENERIC prompt for supporting documents (extraction only)
-            supp_result = run_custom_validation_pipeline(
-                file_path=temp_supp.name,
-                user_prompt=GENERIC_SUPPORTING_DOCUMENT_PROMPT,  # ← Generic extraction prompt
-                mode=agent['mode'],
-                tamper_check=agent.get('tamper_check', False)
-            )
-            
+            # Just store metadata - NO OCR extraction
             supporting_results.append({
                 "file_name": supp_file.filename,
-                "document_type": supp_result.get("document_type", "unknown"),
-                "document_description": supporting_file_descriptions[idx],  # Add description
-                "validation_status": supp_result.get("status"),
-                "validation_score": supp_result.get("score"),
-                "validation_reason": supp_result.get("reason", []),
-                "extracted_json": supp_result.get("doc_extracted_json", {})
+                "document_type": "Analyzed directly by Claude",
+                "document_description": supporting_file_descriptions[idx],
+                "validation_status": "not_extracted",
+                "validation_score": None,
+                "validation_reason": ["Document sent directly to Claude for cross-validation analysis"],
+                "extracted_json": {}  # Empty - no OCR performed
             })
         
-        # Run agentic cross validation
-        print(f"\n[API] Running agentic cross validation across {len(supporting_files)} supporting document(s)...")
+        # Run agentic cross validation (with raw images)
+        print(f"\n[API] Running agentic cross validation with DIRECT IMAGE ANALYSIS (NO OCR for supporting docs)...")
         
         from Nodes.nodes.agentic_cross_validation_node import run_agentic_cross_validation_pipeline
         
@@ -1714,34 +1708,26 @@ async def validate_document_with_supporting(
             main_file_path=temp_main.name,
             main_extracted_json=main_result.get("doc_extracted_json", {}),
             main_document_type=main_result.get("document_type", "unknown"),
-            supporting_file_paths=supporting_temp_files,
-            supporting_extracted_jsons=[sr.get("extracted_json", {}) for sr in supporting_results],
-            supporting_document_types=[sr.get("document_type", "unknown") for sr in supporting_results],
-            supporting_descriptions=supporting_file_descriptions,  # Pass descriptions
+            supporting_file_paths=supporting_temp_files,  # Pass file paths for direct image analysis
+            supporting_extracted_jsons=[{} for _ in supporting_results],  # Empty - not used
+            supporting_document_types=["unknown" for _ in supporting_results],  # Will be detected by Claude
+            supporting_descriptions=supporting_file_descriptions,
             user_prompt=agent['prompt'],
-            cross_validation_prompt=cross_validation_prompt,  # Pass custom cross-validation prompt
+            cross_validation_prompt=cross_validation_prompt,
             mode=agent['mode']
         )
         
         # Determine overall status
         # Fail if: main validation fails OR agentic cross validation fails (risk_score > 70)
         main_validation_passed = main_result.get("status") == "pass"
-        
-        # Supporting docs don't need to "pass" - they just need data extraction
-        # We're removing the supporting_all_passed check since we're only extracting data
-        supporting_extraction_successful = all(sr.get("extracted_json") for sr in supporting_results)
-        
         cross_validation_passed = agentic_cross_validation_result.get("risk_score", 100) <= 70  # Score <= 70 is acceptable
         
-        overall_status = "pass" if (main_validation_passed and supporting_extraction_successful and cross_validation_passed) else "fail"
+        overall_status = "pass" if (main_validation_passed and cross_validation_passed) else "fail"
         
         # Build overall message
         messages = []
         if not main_validation_passed:
             messages.append(f"Main document validation failed: {main_result.get('reason', ['Unknown reason'])}")
-        if not supporting_extraction_successful:
-            failed_extractions = [sr["file_name"] for sr in supporting_results if not sr.get("extracted_json")]
-            messages.append(f"Failed to extract data from supporting documents: {', '.join(failed_extractions)}")
         if not cross_validation_passed:
             messages.append(f"Agentic Cross Validation alert: {agentic_cross_validation_result.get('overall_message', 'Suspicious patterns detected')}")
         
@@ -1819,7 +1805,7 @@ async def validate_document_with_supporting(
                     pass
         if connection and connection.is_connected():
             connection.close()
-
+                        
 # ==================== Analytics Endpoints ====================
 
 @router.get("/creator/{creator_id}/agents")
