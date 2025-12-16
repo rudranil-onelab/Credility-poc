@@ -470,6 +470,44 @@ class ValidationResponse(BaseModel):
     # Reference images
     reference_images: Optional[List[str]] = Field(None, description="S3 URLs of reference images used by this agent")
 
+class SupportingDocumentCheck(BaseModel):
+    """Result of checking one field across documents."""
+    field_name: str
+    main_value: str
+    supporting_values: Optional[List[Dict[str, Any]]] = None
+    status: str  # "consistent", "inconsistent", "missing"
+    message: str
+
+class ContradictionDetail(BaseModel):
+    """Details about a contradiction found."""
+    field_name: str
+    conflicting_documents: List[Dict[str, Any]]
+    severity: str  # "critical", "high", "medium", "low"
+    explanation: str
+
+class AgenticCrossValidationResult(BaseModel):
+    """Result of agentic cross-document validation."""
+    risk_score: int = Field(..., description="Cross-document risk score 0-100 (higher = more risky)")
+    status: str = Field(..., description="pass, suspicious, or fail")
+    identity_verification: Optional[Dict[str, Any]] = None
+    document_relationship: Optional[Dict[str, Any]] = None
+    consistency_checks: Optional[List[SupportingDocumentCheck]] = None
+    contradictions: Optional[List[ContradictionDetail]] = None
+    document_agreement: Optional[Dict[str, Any]] = None
+    warnings: Optional[List[str]] = None
+    overall_message: str
+    processing_time_ms: int
+
+class SupportingDocumentValidationResponse(BaseModel):
+    """Response from supporting document validation."""
+    success: bool
+    main_document: Dict[str, Any] = Field(..., description="Validation result of main document")
+    supporting_documents: List[Dict[str, Any]] = Field(..., description="Validation results of supporting documents")
+    agentic_cross_validation: AgenticCrossValidationResult
+    overall_status: str  # "pass" or "fail" based on both validation and agentic cross validation check
+    overall_message: str
+    agent_name: str
+    processing_time_ms: int
 
 # ==================== Database Connection ====================
 
@@ -1466,6 +1504,321 @@ async def validate_document(
         if connection and connection.is_connected():
             connection.close()
 
+# Add this constant at the top of your router file (before the endpoint)
+GENERIC_SUPPORTING_DOCUMENT_PROMPT = """
+Extract ALL visible information from this document without applying strict validation rules.
+
+Focus on extracting the following fields (if present):
+- Document type (PAN Card, Tax Return, Form 16, Bank Statement, Aadhaar, Passport, etc.)
+- Personal Information:
+  - Full name (in English and regional languages)
+  - Date of birth / Year of birth
+  - Age
+  - Gender
+  - Father's name
+- Identity Numbers:
+  - PAN number
+  - Aadhaar number
+  - Passport number
+  - Voter ID (EPIC)
+  - Driving License number
+  - GSTIN
+  - TAN
+  - Udyam number
+- Contact Information:
+  - Address (permanent/residential)
+  - Mobile number
+  - Email
+  - Pincode
+- Financial Information:
+  - Income/salary
+  - Tax deducted
+  - Employer name
+  - Company name
+  - Account numbers
+- Dates:
+  - Issue date
+  - Expiry date
+  - Assessment year
+  - Financial year
+- Any other identifiable or relevant information
+
+Extract all fields accurately. Do not apply strict pass/fail validation rules.
+Simply extract what is visible and readable in the document.
+"""
+
+
+@router.post("/agent/{agent_name}/validate-supporting", response_model=SupportingDocumentValidationResponse)
+async def validate_document_with_supporting(
+    agent_name: str,
+    request: Request,
+    main_file: UploadFile = File(..., description="Main document file (PDF, JPG, PNG)"),
+    user_id: Optional[str] = Form(None, description="User ID who is using this API"),
+    cross_validation_prompt: Optional[str] = Form(None, description="Optional custom prompt for cross-validation logic"),
+    supporting_file_1: Optional[UploadFile] = File(None, description="Supporting document 1"),
+    supporting_file_1_description: Optional[str] = Form(None, description="Description of supporting document 1 (e.g., 'Medical bill for insurance claim')"),
+    supporting_file_2: Optional[UploadFile] = File(None, description="Supporting document 2"),
+    supporting_file_2_description: Optional[str] = Form(None, description="Description of supporting document 2"),
+    supporting_file_3: Optional[UploadFile] = File(None, description="Supporting document 3"),
+    supporting_file_3_description: Optional[str] = Form(None, description="Description of supporting document 3"),
+    supporting_file_4: Optional[UploadFile] = File(None, description="Supporting document 4"),
+    supporting_file_4_description: Optional[str] = Form(None, description="Description of supporting document 4"),
+    supporting_file_5: Optional[UploadFile] = File(None, description="Supporting document 5"),
+    supporting_file_5_description: Optional[str] = Form(None, description="Description of supporting document 5"),
+):
+    """
+    Validate a main document with supporting documents using agentic cross validation.
+    
+    This endpoint:
+    1. Validates the main document against agent's rules
+    2. Extracts data from each supporting document (using generic extraction prompt)
+    3. Performs cross-validation across all documents (agentic cross validation)
+    4. Checks for inconsistencies and potential cross document errors
+    5. Returns comprehensive results
+    
+    **Parameters:**
+    - **agent_name**: The agent to use for validation
+    - **main_file**: Main document file (PDF, JPG, JPEG, PNG)
+    - **user_id**: Optional user identifier for tracking
+    - **cross_validation_prompt**: Optional custom instructions for cross-validation (e.g., "Check if medical bill matches insurance claim amount")
+    - **supporting_file_1 to 5**: Up to 5 supporting documents
+    - **supporting_file_X_description**: Optional description for each supporting document (e.g., "Medical bill for insurance claim")
+    
+    **Returns:**
+    - **main_document**: Validation result for main document
+    - **supporting_documents**: Extraction results for each supporting document
+    - **agentic_cross_validation**: Cross-validation results and cross-document risk analysis
+    - **overall_status**: "pass" or "fail"
+    - **overall_message**: Summary of results
+    """
+    start_time = time.time()
+    connection = None
+    temp_files = []
+    
+    try:
+        connection = get_database_connection()
+        service = CustomAgentService(connection)
+        
+        # Get agent configuration
+        agent = service.get_agent(agent_name)
+        if not agent:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent '{agent_name}' not found or is inactive"
+            )
+        
+        # Validate main file
+        if not main_file.filename:
+            raise HTTPException(status_code=400, detail="No main file provided")
+        
+        # Collect supporting files
+        supporting_files = [f for f in [supporting_file_1, supporting_file_2, supporting_file_3, supporting_file_4, supporting_file_5] if f and f.filename]
+        supporting_descriptions = [supporting_file_1_description, supporting_file_2_description, supporting_file_3_description, supporting_file_4_description, supporting_file_5_description]
+        
+        # Filter descriptions to match the actual uploaded files
+        supporting_file_descriptions = []
+        desc_index = 0
+        for file in [supporting_file_1, supporting_file_2, supporting_file_3, supporting_file_4, supporting_file_5]:
+            if file and file.filename:
+                supporting_file_descriptions.append(supporting_descriptions[desc_index] or f"Supporting document {len(supporting_file_descriptions) + 1}")
+            desc_index += 1
+        
+        if not supporting_files:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one supporting document is required for agentic cross-validation. Use /validate endpoint for single document validation."
+            )
+        
+        if len(supporting_files) > 5:
+            raise HTTPException(status_code=400, detail="Maximum 5 supporting documents allowed")
+        
+        # Validate file types
+        allowed_extensions = ['.pdf', '.jpg', '.jpeg', '.png']
+        
+        for idx, file in enumerate([main_file] + supporting_files):
+            file_ext = os.path.splitext(file.filename)[1].lower()
+            if file_ext not in allowed_extensions:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid file type for {'main' if idx == 0 else f'supporting'} document: {file_ext}. Allowed: {', '.join(allowed_extensions)}"
+                )
+        
+        print(f"\n{'='*70}")
+        print(f"[API] Processing document validation with agentic cross validation")
+        print(f"[API] Agent: {agent_name}")
+        print(f"[API] Main document: {main_file.filename}")
+        print(f"[API] Supporting documents: {len(supporting_files)}")
+        if cross_validation_prompt:
+            print(f"[API] Custom cross-validation prompt provided: {cross_validation_prompt[:100]}...")
+        for idx, desc in enumerate(supporting_file_descriptions):
+            print(f"[API]   - Supporting doc {idx+1}: {desc}")
+        print(f"{'='*70}\n")
+        
+        # Process main document with agent's specific prompt
+        from Nodes.nodes.custom_validation_node import run_custom_validation_pipeline
+        
+        temp_main = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(main_file.filename)[1])
+        main_content = await main_file.read()
+        temp_main.write(main_content)
+        temp_main.close()
+        temp_files.append(temp_main.name)
+        
+        print(f"[API] Running main document validation with agent-specific prompt...")
+        main_result = run_custom_validation_pipeline(
+            file_path=temp_main.name,
+            user_prompt=agent['prompt'],  # Agent-specific prompt for main doc
+            mode=agent['mode'],
+            tamper_check=agent.get('tamper_check', False)
+        )
+        
+        # Process supporting documents with GENERIC extraction prompt
+        supporting_results = []
+        supporting_temp_files = []
+        
+        print(f"[API] Processing supporting documents with generic extraction prompt...")
+        
+        for idx, supp_file in enumerate(supporting_files):
+            print(f"[API] Extracting data from supporting document {idx+1}: {supp_file.filename}")
+            
+            temp_supp = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(supp_file.filename)[1])
+            supp_content = await supp_file.read()
+            temp_supp.write(supp_content)
+            temp_supp.close()
+            temp_files.append(temp_supp.name)
+            supporting_temp_files.append(temp_supp.name)
+            
+            # Use GENERIC prompt for supporting documents (extraction only)
+            supp_result = run_custom_validation_pipeline(
+                file_path=temp_supp.name,
+                user_prompt=GENERIC_SUPPORTING_DOCUMENT_PROMPT,  # ← Generic extraction prompt
+                mode=agent['mode'],
+                tamper_check=agent.get('tamper_check', False)
+            )
+            
+            supporting_results.append({
+                "file_name": supp_file.filename,
+                "document_type": supp_result.get("document_type", "unknown"),
+                "document_description": supporting_file_descriptions[idx],  # Add description
+                "validation_status": supp_result.get("status"),
+                "validation_score": supp_result.get("score"),
+                "validation_reason": supp_result.get("reason", []),
+                "extracted_json": supp_result.get("doc_extracted_json", {})
+            })
+        
+        # Run agentic cross validation
+        print(f"\n[API] Running agentic cross validation across {len(supporting_files)} supporting document(s)...")
+        
+        from Nodes.nodes.agentic_cross_validation_node import run_agentic_cross_validation_pipeline
+        
+        agentic_cross_validation_result = run_agentic_cross_validation_pipeline(
+            main_file_path=temp_main.name,
+            main_extracted_json=main_result.get("doc_extracted_json", {}),
+            main_document_type=main_result.get("document_type", "unknown"),
+            supporting_file_paths=supporting_temp_files,
+            supporting_extracted_jsons=[sr.get("extracted_json", {}) for sr in supporting_results],
+            supporting_document_types=[sr.get("document_type", "unknown") for sr in supporting_results],
+            supporting_descriptions=supporting_file_descriptions,  # Pass descriptions
+            user_prompt=agent['prompt'],
+            cross_validation_prompt=cross_validation_prompt,  # Pass custom cross-validation prompt
+            mode=agent['mode']
+        )
+        
+        # Determine overall status
+        # Fail if: main validation fails OR agentic cross validation fails (risk_score > 70)
+        main_validation_passed = main_result.get("status") == "pass"
+        
+        # Supporting docs don't need to "pass" - they just need data extraction
+        # We're removing the supporting_all_passed check since we're only extracting data
+        supporting_extraction_successful = all(sr.get("extracted_json") for sr in supporting_results)
+        
+        cross_validation_passed = agentic_cross_validation_result.get("risk_score", 100) <= 70  # Score <= 70 is acceptable
+        
+        overall_status = "pass" if (main_validation_passed and supporting_extraction_successful and cross_validation_passed) else "fail"
+        
+        # Build overall message
+        messages = []
+        if not main_validation_passed:
+            messages.append(f"Main document validation failed: {main_result.get('reason', ['Unknown reason'])}")
+        if not supporting_extraction_successful:
+            failed_extractions = [sr["file_name"] for sr in supporting_results if not sr.get("extracted_json")]
+            messages.append(f"Failed to extract data from supporting documents: {', '.join(failed_extractions)}")
+        if not cross_validation_passed:
+            messages.append(f"Agentic Cross Validation alert: {agentic_cross_validation_result.get('overall_message', 'Suspicious patterns detected')}")
+        
+        overall_message = " | ".join(messages) if messages else "All validations passed successfully"
+        
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Build response
+        response_data = {
+            "success": True,
+            "main_document": {
+                "file_name": main_file.filename,
+                "document_type": main_result.get("document_type", "unknown"),
+                "validation_status": main_result.get("status"),
+                "validation_score": main_result.get("score"),
+                "validation_reason": main_result.get("reason", []),
+                "extracted_json": main_result.get("doc_extracted_json", {}),
+                "tampering_score": main_result.get("tampering_score"),
+                "tampering_status": main_result.get("tampering_status"),
+                "tampering_details": main_result.get("tampering_details"),
+                "ocr_extraction_status": main_result.get("ocr_extraction_status"),
+                "ocr_extraction_confidence": main_result.get("ocr_extraction_confidence"),
+                "ocr_extraction_reason": main_result.get("ocr_extraction_reason")
+            },
+            "supporting_documents": supporting_results,
+            "agentic_cross_validation": agentic_cross_validation_result,
+            "overall_status": overall_status,
+            "overall_message": overall_message,
+            "agent_name": agent_name,
+            "processing_time_ms": processing_time_ms
+        }
+        
+        # Record in database
+        client_ip = get_client_ip(request)
+        db_result = {
+            "status": overall_status,
+            "score": min(main_result.get("score", 0), agentic_cross_validation_result.get("risk_score", 100)),
+            "reason": [overall_message],
+            "file_name": main_file.filename,
+            "doc_extracted_json": main_result.get("doc_extracted_json", {}),
+            "document_type": main_result.get("document_type"),
+            "supporting_documents_count": len(supporting_results),
+            "risk_score": agentic_cross_validation_result.get("risk_score"),
+            "cross_validation_status": agentic_cross_validation_result.get("status"),
+            "contradictions_found": len(agentic_cross_validation_result.get("contradictions", []))
+        }
+        
+        service.record_result(
+            agent_id=agent['id'],
+            agent_name=agent_name,
+            api_endpoint=f"/api/agent/{agent_name}/validate-supporting",
+            user_id=user_id,
+            result=db_result,
+            request_ip=client_ip,
+            processing_time_ms=processing_time_ms
+        )
+        
+        return SupportingDocumentValidationResponse(**response_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[API ERROR] Validation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Validation failed: {str(e)}")
+        
+    finally:
+        # Cleanup temp files
+        for temp_path in temp_files:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+        if connection and connection.is_connected():
+            connection.close()
 
 # ==================== Analytics Endpoints ====================
 
