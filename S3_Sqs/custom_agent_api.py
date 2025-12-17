@@ -473,7 +473,7 @@ class ValidationResponse(BaseModel):
 class SupportingDocumentCheck(BaseModel):
     """Result of checking one field across documents."""
     field_name: str
-    main_value: str
+    main_value: Optional[str] = None  # Can be None if field doesn't exist in main document
     supporting_values: Optional[List[Dict[str, Any]]] = None
     status: str  # "consistent", "inconsistent", "missing"
     message: str
