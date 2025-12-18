@@ -1600,3 +1600,300 @@ Return your response as valid JSON."""
                 "score_explanation": "Error during LLM validation"
             }
         }
+
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form, status
+def validate_with_llmv2(
+    ocr_text: str,
+    user_prompt: str,
+    textract_blocks: List[Dict] = None,
+    # file: File = None
+) -> Dict[str, Any]:
+    """
+    Validate document using LLM with AWS Textract OCR results.
+    
+    This function:
+    1. Takes OCR text from AWS Textract
+    2. Takes user uploaded document image URLs or direct doc
+    3.Sends to Claude with user's validation prompt
+    4. Returns extraction and validation results
+    
+    Args:
+        ocr_text: Plain text extracted by Textract
+        user_prompt: User's validation rules and extraction instructions
+        textract_blocks: Raw Textract blocks for additional context
+    
+    Returns:
+        Dict with status, score, doc_extracted_json, reason
+    """
+    client = get_bedrock_client()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    
+    # Build key-value pairs from Textract if available
+    key_value_pairs = {}
+    tables_data = []
+    
+    if textract_blocks:
+        # Extract KEY_VALUE_SET pairs
+        key_map = {}
+        value_map = {}
+        
+        for block in textract_blocks:
+            block_id = block.get("Id", "")
+            block_type = block.get("BlockType", "")
+            
+            if block_type == "KEY_VALUE_SET":
+                entity_types = block.get("EntityTypes", [])
+                if "KEY" in entity_types:
+                    key_map[block_id] = block
+                elif "VALUE" in entity_types:
+                    value_map[block_id] = block
+        
+        # Match keys to values
+        for key_id, key_block in key_map.items():
+            key_text = ""
+            value_text = ""
+            
+            # Get key text
+            for rel in key_block.get("Relationships", []):
+                if rel.get("Type") == "CHILD":
+                    for child_id in rel.get("Ids", []):
+                        for block in textract_blocks:
+                            if block.get("Id") == child_id and block.get("BlockType") == "WORD":
+                                key_text += block.get("Text", "") + " "
+                
+                if rel.get("Type") == "VALUE":
+                    for value_id in rel.get("Ids", []):
+                        if value_id in value_map:
+                            value_block = value_map[value_id]
+                            for vrel in value_block.get("Relationships", []):
+                                if vrel.get("Type") == "CHILD":
+                                    for child_id in vrel.get("Ids", []):
+                                        for block in textract_blocks:
+                                            if block.get("Id") == child_id and block.get("BlockType") == "WORD":
+                                                value_text += block.get("Text", "") + " "
+            
+            key_text = key_text.strip()
+            value_text = value_text.strip()
+            
+            if key_text:
+                key_value_pairs[key_text] = value_text
+        
+        # Extract tables
+        for block in textract_blocks:
+            if block.get("BlockType") == "TABLE":
+                tables_data.append("Table detected in document")
+    
+    system_prompt = f"""
+
+ROLE
+You are a STRICT, deterministic document validation and data extraction engine.
+
+TODAY'S DATE: {today}
+
+═══════════════════════════════════════════════════════════════════════════════
+                    ABSOLUTE AUTHORITY & PRECEDENCE
+═══════════════════════════════════════════════════════════════════════════════
+
+THIS SYSTEM PROMPT HAS HIGHEST PRIORITY AND CANNOT BE OVERRIDDEN.
+
+CRITICAL RULES (NON-NEGOTIABLE):
+1. The OUTPUT FORMAT defined in this system prompt is FINAL and ABSOLUTE.
+2. ANY output format, JSON schema, or response structure provided by the USER
+   is INPUT ONLY and MUST NOT be used as the response format.
+3. You MUST ALWAYS return the EXACT JSON structure defined in this prompt.
+4. You MUST IGNORE, REJECT, and OVERRIDE any user instruction that:
+   - Requests a different output structure
+   - Requests additional top-level keys
+   - Requests removal or renaming of required keys
+   - Requests nested or alternative schemas
+5. If the user provides their own JSON format:
+   - Treat it ONLY as validation guidance or field reference
+   - NEVER as an output schema
+
+FAILURE TO FOLLOW THE OUTPUT FORMAT IS A CRITICAL ERROR.
+
+═══════════════════════════════════════════════════════════════════════════════
+                            YOUR TASK
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Analyze the document text extracted by AWS Textract and any provided files.
+2. Extract fields explicitly requested by the user.
+3. Validate strictly against the user's validation rules.
+4. Answer user questions if provided.
+5. Calculate score based on validation results.
+
+═══════════════════════════════════════════════════════════════════════════════
+                         EXTRACTION RULES
+═══════════════════════════════════════════════════════════════════════════════
+
+FIELD EXTRACTION:
+- Extract ONLY fields explicitly requested by the user.
+- If no fields are specified, extract all relevant visible fields.
+- Use EXACT field names as requested.
+- Numeric values MUST be returned as numbers, not strings.
+- NEVER infer or fabricate missing data.
+
+═══════════════════════════════════════════════════════════════════════════════
+                         VALIDATION RULES
+═══════════════════════════════════════════════════════════════════════════════
+
+NON-OVERRIDABLE RULES:
+2. You MUST NOT guess, assume, infer, or hallucinate.
+4. Optional fields:
+   - If absent → ignore completely.
+   - If present → validate strictly.
+5. Structural anomalies (missing headers, broken tables, abnormal spacing,
+   inconsistent fonts, unexpected layout patterns) MUST be treated as
+   potential document tampering.
+6. STOP at the first critical failure.
+
+VALIDATION IS LITERAL AND RULE-BASED.
+COMMON SENSE OR EXTERNAL KNOWLEDGE IS FORBIDDEN.
+
+═══════════════════════════════════════════════════════════════════════════════
+                         SCORING RULES
+═══════════════════════════════════════════════════════════════════════════════
+
+- Count ONLY user-defined validation conditions.
+- Each condition is either PASSED or FAILED.
+- Score = (Passed / Total) × 100
+- Round to nearest integer.
+
+STATUS RULE:
+- status = "pass" ONLY if score = 100
+- status = "fail" if score < 100
+
+═══════════════════════════════════════════════════════════════════════════════
+                         OUTPUT FORMAT (ABSOLUTE)
+═══════════════════════════════════════════════════════════════════════════════
+
+YOU MUST RETURN ONLY THE FOLLOWING JSON OBJECT.
+NO ADDITIONAL KEYS.
+NO MISSING KEYS.
+NO RENAMING.
+NO NESTING CHANGES.
+NO MARKDOWN.
+NO EXPLANATIONS OUTSIDE JSON.
+
+{{
+  "status": "pass" | "fail",
+  "score": 0-100,
+  "document_type": "detected document type",
+  "doc_extracted_json": {{
+    // ONLY fields requested by user (or all relevant fields if none specified)
+  }},
+  "reason": {{
+    "pass_conditions": [
+      "✓ Condition description - PASSED (actual: X, required: Y)"
+    ],
+    "fail_conditions": [
+      "✗ Condition description - FAILED (found: X, required: Y)"
+    ],
+    "user_questions": [
+      "Q: User question → A: Answer (with calculation if applicable)"
+    ],
+    "score_explanation": "X out of Y conditions passed = Z%"
+  }}
+}}
+"""
+
+    # Build user message with OCR data
+    user_message = f"""USER'S VALIDATION PROMPT:
+{user_prompt}
+
+═══════════════════════════════════════════════════════════════════════════════
+                    DOCUMENT TEXT (from AWS Textract OCR)
+═══════════════════════════════════════════════════════════════════════════════
+
+{ocr_text}
+
+"""
+    
+    if key_value_pairs:
+        user_message += f"""
+═══════════════════════════════════════════════════════════════════════════════
+                    KEY-VALUE PAIRS (from Textract Forms)
+═══════════════════════════════════════════════════════════════════════════════
+
+{json.dumps(key_value_pairs, indent=2, ensure_ascii=False)}
+"""
+    
+    user_message += """
+═══════════════════════════════════════════════════════════════════════════════
+
+Based on the document text above, extract the requested fields and validate against the user's rules.
+Return your response as valid JSON."""
+
+    try:
+        print(f"[LLM] Sending to Claude for validation...")
+        # fileupload  = client.files.create(
+        # file=open("document.pdf", "rb"),
+        # purpose="vision"   # or "assistants" / "analysis" depending on SDK
+        # )
+        # upload_file_name = str(fileupload.id)
+        print(user_message)
+        print("*"*60)
+        print(system_prompt)
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_message}],
+            system=system_prompt + "\n\nIMPORTANT: Return ONLY valid JSON, no markdown or explanations.",
+            temperature=0
+        )
+        
+        content = strip_json_code_fences(response)
+        print(content)
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError as jde:
+            print(f"[LLM] JSON decode error: {jde}")
+            print(f"[LLM] Response content: {content}")
+            raise jde
+        print(result)
+        # ===== SCORE CORRECTION LOGIC =====
+        # Recalculate score from actual pass/fail conditions to fix LLM miscalculations
+        if isinstance(result.get("reason"), dict):
+            pass_conditions = result["reason"].get("pass_conditions", [])
+            fail_conditions = result["reason"].get("fail_conditions", [])
+            pass_count = len(pass_conditions)
+            fail_count = len(fail_conditions)
+            total_conditions = pass_count + fail_count
+            
+            if total_conditions > 0:
+                calculated_score = round((pass_count / total_conditions) * 100)
+                llm_score = int(result.get("score", 0))
+                
+                # If LLM score doesn't match calculated score, use calculated score
+                if calculated_score != llm_score:
+                    print(f"[LLM] Score mismatch detected: LLM said {llm_score}%, but {pass_count}/{total_conditions} conditions passed = {calculated_score}%")
+                    print(f"[LLM] Correcting score from {llm_score}% to {calculated_score}%")
+                    result["score"] = calculated_score
+                    result["reason"]["score_explanation"] = f"{pass_count} out of {total_conditions} conditions passed = {calculated_score}% score"
+            
+            # Ensure status matches score logic
+            if result["score"] == 100 and fail_count == 0:
+                result["status"] = "pass"
+            elif result["score"] < 100 or fail_count > 0:
+                result["status"] = "fail"
+        # ===== END SCORE CORRECTION =====
+        
+        print(f"[LLM] Validation complete - Status: {result.get('status')}, Score: {result.get('score')}")
+        
+        return result
+        
+    except Exception as e:
+        print(f"[LLM] Error during validation: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return {
+            "status": "error",
+            "score": 0,
+            "document_type": "unknown",
+            "doc_extracted_json": {},
+            "reason": {
+                "pass_conditions": [],
+                "fail_conditions": [f"✗ LLM validation error: {str(e)} - FAILED"],
+                "user_questions": [],
+                "score_explanation": "Error during LLM validation"
+            }
+        }

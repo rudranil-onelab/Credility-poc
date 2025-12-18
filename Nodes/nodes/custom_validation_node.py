@@ -13,6 +13,7 @@ from typing import Dict, Any
 from ..config.state_models import PipelineState
 from ..utils.helpers import log_agent_event
 from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form, status
 
 
 def CustomValidation(state: PipelineState, user_prompt: str) -> Dict[str, Any]:
@@ -210,9 +211,9 @@ Return JSON result.
         log_agent_event(state, "Custom Validation", "error", {"error": str(e)})
         return result
 
-
 def run_custom_validation_pipeline(
     file_path: str,
+    file: UploadFile,
     user_prompt: str,
     mode: str = "ocr+llm",
     tamper_check: bool = False
@@ -247,7 +248,7 @@ def run_custom_validation_pipeline(
     import os
     import time
     from ..tools.aws_services import run_textract_local_file
-    from .generic_extraction import validate_with_llm
+    from .generic_extraction import validate_with_llm, validate_with_llmv2
     
     start_time = time.time()
     file_name = os.path.basename(file_path)
@@ -292,10 +293,17 @@ def run_custom_validation_pipeline(
         
         # Step 2: Run LLM validation with user prompt
         print("[Custom Pipeline] Step 2/2: Running LLM validation with user prompt...")
-        result = validate_with_llm(
+        # result = validate_with_llm(
+        #     ocr_text=ocr_text,
+        #     user_prompt=user_prompt,
+        #     textract_blocks=textract_result.get("blocks", [])
+            
+        # )
+        result = validate_with_llmv2(
             ocr_text=ocr_text,
             user_prompt=user_prompt,
-            textract_blocks=textract_result.get("blocks", [])
+            textract_blocks=textract_result.get("blocks", []),
+            # file=file
         )
         
         # ===== VISUAL TAMPERING DETECTION =====
