@@ -1626,7 +1626,7 @@ def validate_with_llmv2(
         Dict with status, score, doc_extracted_json, reason
     """
     client = get_bedrock_client()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%d")
     
     # Build key-value pairs from Textract if available
     key_value_pairs = {}

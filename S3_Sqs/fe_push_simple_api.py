@@ -37,7 +37,8 @@ except ImportError:
 try:
     from S3_Sqs.custom_agent_api import router as custom_agent_router
 except ImportError:
-    from custom_agent_api import router as custom_agent_router
+    from .custom_agent_api import router as custom_agent_router
+    
 
 app = FastAPI(
     title="AI Agents Database API",

@@ -529,6 +529,13 @@ def get_database_connection():
             detail=f"Database connection error: {str(e)}"
         )
 
+class ClientDbConnection(BaseModel):
+    client_id : str
+    host : str
+
+## Client DB connection 
+def get_client_db_connection():
+    return "pass"
 
 def get_client_ip(request: Request) -> str:
     """Extract client IP from request, handling proxies."""
@@ -1409,6 +1416,7 @@ async def validate_document(
             tamper_check=tamper_check
         )
         
+        
         processing_time_ms = int((time.time() - start_time) * 1000)
         
         # Build comprehensive result JSON for database (includes all details for logs)
@@ -2208,3 +2216,149 @@ Response includes:
         
         if connection and connection.is_connected():
             connection.close()
+
+
+from S3_Sqs.db_validation_agent import call_llm
+import json
+from S3_Sqs.db_connection import get_client_database_connection
+import json
+from S3_Sqs.schema_explorer import SchemaExplorer
+
+from S3_Sqs.client_registry import CLIENT_DB_REGISTRY
+normalize = SchemaExplorer.normalize
+class DB_validate(BaseModel):
+    client_id: str
+    ocr_data: dict[str,str]
+
+@router.post("/db_validation")
+def validate_document(req: DB_validate):
+    conn = get_client_database_connection(req.client_id)
+
+    try:
+        db_type = CLIENT_DB_REGISTRY[req.client_id]["db_type"]
+        schema = SchemaExplorer(conn, db_type)
+        print(schema.tables)
+        system_prompt = f"""
+You are a STRICT KYC SQL-planning engine.
+
+CLIENT DATABASE SCHEMA:
+{json.dumps(schema.tables, indent=2)}
+
+OCR EXTRACTED DATA:
+{json.dumps(req.ocr_data, indent=2)}
+
+Your task is to generate a SQL validation plan that verifies:
+1. Each OCR field exists in the database (field-level validation)
+2. All OCR fields belong to the SAME PERSON (identity consistency)
+
+CRITICAL RULES:
+
+FIELD-LEVEL:
+- For each OCR field:
+  - Find the best matching column in ANY table
+  - Query ONLY that column
+  - Never use another OCR field to filter it
+
+IDENTITY-LEVEL:
+- Select the strongest identity anchor (Aadhaar > PAN > Passport > Voter ID)
+- Find the person key (user_id, customer_id, etc)
+- Verify that the OCR VALUE of every field belongs to the SAME person
+- Use joins ONLY via the person key
+
+NEVER:
+- Guess
+- Use hardcoded table names
+- Mix identity and field checks
+
+Return ONLY this exact JSON:
+
+{{
+  "anchor": {{
+    "field": "",
+    "value": "",
+    "table": "",
+    "person_key": ""
+  }},
+  "field_queries": [
+    {{
+      "field": "",
+      "sql": ""
+    }}
+  ],
+  "identity_queries": [
+    {{
+      "field": "",
+      "sql": ""
+    }}
+  ]
+}}
+"""
+
+        plan = call_llm(system_prompt, "Generate KYC SQL plan")
+
+        # 3. Run field-level queries (L1)
+        field_results = {}
+        for q in plan["field_queries"]:
+            rows = schema.query(q["sql"])
+            field_results[q["field"]] = rows
+
+        # 4. Run identity-level queries (L2)
+        identity_results = {}
+        for q in plan["identity_queries"]:
+            rows = schema.query(q["sql"])
+            identity_results[q["field"]] = rows
+
+        # 5. Compute L1 validation
+        validations = []
+        for field, ocr_val in req.ocr_data.items():
+            rows = field_results.get(field, [])
+            if not rows:
+                validations.append({
+                    "field": field,
+                    "ocr_value": ocr_val,
+                    "db_value": "",
+                    "status": "NOT_FOUND"
+                })
+            else:
+                db_val = list(rows[0].values())[0]
+                if normalize(ocr_val) == normalize(db_val):
+                    status = "MATCH"
+                else:
+                    status = "MISMATCH"
+
+                validations.append({
+                    "field": field,
+                    "ocr_value": ocr_val,
+                    "db_value": str(db_val),
+                    "status": status
+                })
+
+        # 6. Compute L2 identity consistency
+        identity_checks = []
+        for field in identity_results:
+            status = "MATCH" if identity_results[field] else "MISMATCH"
+            identity_checks.append({
+                "field": field,
+                "status": status
+            })
+
+        identity_pass = all(c["status"] == "MATCH" for c in identity_checks)
+
+        # 7. Final KYC decision
+        kyc_pass = (
+            all(v["status"] == "MATCH" for v in validations)
+            and identity_pass
+        )
+
+        return {
+            "anchor": plan["anchor"],
+            "field_validation": validations,
+            "identity_validation": {
+                "checks": identity_checks,
+                "identity_status": "PASS" if identity_pass else "FAIL"
+            },
+            "overall_kyc_status": "PASS" if kyc_pass else "FAIL"
+        }
+
+    finally:
+        conn.close()

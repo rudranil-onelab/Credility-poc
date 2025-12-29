@@ -211,10 +211,11 @@ Return JSON result.
         log_agent_event(state, "Custom Validation", "error", {"error": str(e)})
         return result
 
+from typing import Optional
 def run_custom_validation_pipeline(
-    file_path: str,
-    file: UploadFile,
-    user_prompt: str,
+    file_path: Optional[str] = None,
+    file: Optional[UploadFile] = None,
+    user_prompt: str = "",
     mode: str = "ocr+llm",
     tamper_check: bool = False
 ) -> Dict[str, Any]:
