@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+.env.*
+*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.DS_Store
+
+# Outputs and Logs
+outputs/
+Nodes/outputs/
+cross_validation/reports/
+result/
+*.log
+*.txt.log
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+# Documentation
+*.md
+docs/
+README.md
+TROUBLESHOOTING.md
+IMPLEMENTATION_SUMMARY.md
+UPGRADE_NOTES.md
+QUICK_START.md
+
+# Test files
+tests/
+test_*.py
+*_test.py
+.pytest_cache/
+
+# Images and test data (except necessary ones)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+!Adhar.png
+!ID_-_Dennis_McKinley.jpeg
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+.cache/
+
