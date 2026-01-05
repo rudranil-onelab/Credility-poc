@@ -174,6 +174,17 @@ def extract_identifiable_fields(extracted_json: Dict[str, Any], document_type: s
     
     return identifiable_fields
 
+def textract_pages_to_text(pages: dict) -> str:
+    output = ""
+
+    for page_num in sorted(pages.keys()):
+        output += f"\n\n===== PAGE {page_num} =====\n"
+
+        for block in pages[page_num]:
+            if block["BlockType"] == "LINE":
+                output += block["Text"] + "\n"
+
+    return output
 
 def run_agentic_cross_validation_pipeline(
     main_file_path: str,
@@ -433,13 +444,17 @@ IMPORTANT:
             print(f"[AGENTIC CROSS VALIDATION] Main document encoded: {main_media_type}")
         except Exception as e:
             print(f"[AGENTIC CROSS VALIDATION] Warning: Could not encode main document: {e}")
-        
+        from ..tools.aws_services import run_textract_local_file
         # Encode supporting document images
-        supporting_images = []
+        import os
+        # supporting_images = []
         for i, file_path in enumerate(supporting_file_paths):
             try:
-                image_data, media_type = encode_image_to_base64(file_path)
-                supporting_images.append((image_data, media_type))
+                media_type = os.path.splitext(file_path)[1].lower()
+                # image_data, media_type = encode_image_to_base64(file_path)
+                # supporting_images.append((image_data, media_type))
+                textract_data = run_textract_local_file(file_path)
+                document_text = textract_pages_to_text(textract_data["pages"])     
                 print(f"[AGENTIC CROSS VALIDATION] Supporting document {i+1} encoded: {media_type}")
             except Exception as e:
                 print(f"[AGENTIC CROSS VALIDATION] Warning: Could not encode supporting document {i+1}: {e}")
@@ -459,16 +474,16 @@ IMPORTANT:
             })
         
         # Add all supporting document images
-        for image_data, media_type in supporting_images:
-            message_content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": image_data
-                }
-            })
-        
+        # for image_data, media_type in supporting_images:
+        #     message_content.append({
+        #         "type": "image",
+        #         "source": {
+        #             "type": "base64",
+        #             "media_type": media_type,
+        #             "data": image_data
+        #         }
+        #     })
+        message_content.append(document_text)
         # Add text prompt
         message_content.append({
             "type": "text",

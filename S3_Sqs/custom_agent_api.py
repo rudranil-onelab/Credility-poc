@@ -2362,3 +2362,60 @@ Return ONLY this exact JSON:
 
     finally:
         conn.close()
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+import time
+import json
+class DemoStream():
+
+    def demoOCR(self):
+        time.sleep(1)
+        return str("OCR Completed")
+
+    def get_tables(self):
+        time.sleep(1)
+        return str("Tables fetched")
+
+    def demoDbConnection(self):
+        time.sleep(1)
+        return str("Connected to DB")
+
+    def demoSchemaExtraction(self):
+        time.sleep(1)
+        return str("Schema extracted")
+
+    def finalResult(self):
+        time.sleep(1)
+        return str("Final Result Generated")
+def demo_stream_generator():
+    demo = DemoStream()
+
+    ocr = demo.demoOCR()
+    yield f"data: {json.dumps({'stage': 'ocr', 'data': ocr})}\n\n"
+
+    tables = demo.get_tables()
+    yield f"data: {json.dumps({'stage': 'tables', 'data': tables})}\n\n"
+
+    dbconn = demo.demoDbConnection()
+    yield f"data: {json.dumps({'stage': 'db_connection', 'data': dbconn})}\n\n"
+
+    schema = demo.demoSchemaExtraction()
+    yield f"data: {json.dumps({'stage': 'schema', 'data': schema})}\n\n"
+
+    final = demo.finalResult()
+    yield f"data: {json.dumps({
+        "stage": "done",
+        "result": {
+            "ocr": ocr,
+            "tables": tables,
+            "db_connection": dbconn,
+            "schema_extraction": schema,
+            "final_result": final
+        }
+    }) } \n\n"
+@router.post("/demo_stream")
+def demo_stream():
+    return StreamingResponse(
+        demo_stream_generator(),
+        media_type="text/event-stream"
+    )

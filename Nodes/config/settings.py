@@ -31,8 +31,9 @@ BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20
 # - anthropic.claude-3-5-haiku-20241022-v1:0 (Claude 3.5 Haiku - text only!)
 
 # S3 Configuration - POC bucket for Textract
-S3_BUCKET = os.getenv("S3_BUCKET", "lendingwise-poc")
-
+# S3_BUCKET = os.getenv("S3_BUCKET", "lendingwise-poc")
+#New bucket for Project Finance Agents I AM Role assigned
+S3_BUCKET = os.getenv("S3_BUCKET", "proj-finance-agents")
 # Textract Configuration
 TEXTRACT_MAX_WAIT_SECONDS = int(os.getenv("TEXTRACT_MAX_WAIT_SECONDS", "600"))
 TEXTRACT_FEATURE_TYPES = ["TABLES", "FORMS"]
