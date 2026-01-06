@@ -144,36 +144,30 @@ def run_textract_async_s3(
     key: str,
     max_wait_seconds: int = 300,
 ) -> Dict[str, Any]:
-    """
-    Run Textract async OCR (RAW text) on PDF or Image stored in S3.
-    Supports multi-page PDFs (<= 30 pages).
-    """
+
     client = get_textract_client()
 
-    # 1. Start job (RAW text extraction)
     try:
-        response = client.start_document_text_detection(
+        response = client.start_document_analysis(
             DocumentLocation={
                 "S3Object": {
                     "Bucket": bucket,
                     "Name": key,
                 }
-            }
+            },
+            FeatureTypes=TEXTRACT_FEATURE_TYPES  # <-- CRITICAL
         )
         job_id = response["JobId"]
         print(f"[Textract] Job started: {job_id}")
     except (BotoCoreError, ClientError) as e:
         raise RuntimeError(f"Textract start failed: {e}")
 
-    # 2. Poll job status
     start_time = time.time()
     job_status = None
 
     while True:
         try:
-            status_response = client.get_document_text_detection(
-                JobId=job_id
-            )
+            status_response = client.get_document_analysis(JobId=job_id)
             job_status = status_response["JobStatus"]
         except (BotoCoreError, ClientError) as e:
             raise RuntimeError(f"Textract polling failed: {e}")
@@ -182,9 +176,7 @@ def run_textract_async_s3(
             break
 
         if time.time() - start_time > max_wait_seconds:
-            raise TimeoutError(
-                f"Textract job {job_id} timed out after {max_wait_seconds}s"
-            )
+            raise TimeoutError(f"Textract job {job_id} timed out after {max_wait_seconds}s")
 
         print(f"[Textract] Status: {job_status}")
         time.sleep(TEXTRACT_POLL_INTERVAL)
@@ -193,21 +185,15 @@ def run_textract_async_s3(
         reason = status_response.get("StatusMessage", "Unknown")
         raise RuntimeError(f"Textract job failed: {reason}")
 
-    # 3. Fetch ALL pages (pagination-safe)
     blocks: List[Dict[str, Any]] = []
     next_token = None
 
     while True:
         try:
             if next_token:
-                page = client.get_document_text_detection(
-                    JobId=job_id,
-                    NextToken=next_token,
-                )
+                page = client.get_document_analysis(JobId=job_id, NextToken=next_token)
             else:
-                page = client.get_document_text_detection(
-                    JobId=job_id
-                )
+                page = client.get_document_analysis(JobId=job_id)
         except (BotoCoreError, ClientError) as e:
             raise RuntimeError(f"Textract pagination failed: {e}")
 
@@ -217,13 +203,12 @@ def run_textract_async_s3(
         if not next_token:
             break
 
-    # 4. Metadata
     pages_total = status_response.get("DocumentMetadata", {}).get("Pages")
 
     return {
         "engine_meta": {
             "engine": "aws_textract",
-            "mode": "start_document_text_detection",
+            "mode": "start_document_analysis",
             "job_id": job_id,
             "pages": pages_total,
             "status": job_status,
