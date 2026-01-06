@@ -178,13 +178,54 @@ def textract_pages_to_text(pages: dict) -> str:
     output = ""
 
     for page_num in sorted(pages.keys()):
+        blocks = pages[page_num]
+        block_map = {b["Id"]: b for b in blocks if "Id" in b}
+
         output += f"\n\n===== PAGE {page_num} =====\n"
 
-        for block in pages[page_num]:
-            if block["BlockType"] == "LINE":
-                output += block["Text"] + "\n"
+        # 1️⃣ Existing behavior (OCR lines)
+        for block in blocks:
+            if block.get("BlockType") == "LINE":
+                output += block.get("Text", "") + "\n"
+
+        # 2️⃣ Inject FORMS (Key → Value)
+        form_lines = []
+
+        def get_text(block):
+            text = ""
+            for rel in block.get("Relationships", []):
+                if rel["Type"] == "CHILD":
+                    for cid in rel["Ids"]:
+                        child = block_map.get(cid)
+                        if not child:
+                            continue
+                        if child["BlockType"] == "WORD":
+                            text += child.get("Text", "") + " "
+                        elif child["BlockType"] == "SELECTION_ELEMENT":
+                            if child.get("SelectionStatus") == "SELECTED":
+                                text += "X "
+            return text.strip()
+
+        for block in blocks:
+            if block.get("BlockType") == "KEY_VALUE_SET" and "KEY" in block.get("EntityTypes", []):
+                key = get_text(block)
+                value = ""
+
+                for rel in block.get("Relationships", []):
+                    if rel["Type"] == "VALUE":
+                        for vid in rel["Ids"]:
+                            value = get_text(block_map.get(vid, {}))
+
+                if key and value:
+                    form_lines.append(f"{key} : {value}")
+
+        if form_lines:
+            output += "\n--- FORMS ---\n"
+            for line in form_lines:
+                output += line + "\n"
 
     return output
+
 
 
 def textract_result_to_text(result: Dict[str, Any]) -> str:
