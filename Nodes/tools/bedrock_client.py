@@ -23,7 +23,11 @@ def strip_json_code_fences(s: str) -> str:
             s = s[:-3].strip()
     return s
 
-
+import json
+import time
+import random
+from typing import List, Dict, Any
+from botocore.exceptions import ClientError, BotoCoreError
 class BedrockClaudeClient:
     """
     AWS Bedrock client for Claude 3.5 Haiku.
@@ -54,45 +58,120 @@ class BedrockClaudeClient:
                 )
         return self._client
     
+    # def chat_completion(
+    #     self,
+    #     messages: List[Dict[str, Any]],
+    #     system: str = "",
+    #     temperature: float = 0,
+    #     max_tokens: int = 4096
+    # ) -> str:
+    #     """
+    #     Send a chat completion request to Claude via Bedrock.
+        
+    #     Args:
+    #         messages: List of message dicts with 'role' and 'content'
+    #         system: System prompt
+    #         temperature: Sampling temperature (0-1)
+    #         max_tokens: Maximum tokens in response
+            
+    #     Returns:
+    #         Response text from Claude
+    #     """
+    #     # Build request body for Claude
+    #     body = {
+    #         "anthropic_version": "bedrock-2023-05-31",
+    #         "max_tokens": max_tokens,
+    #         "temperature": temperature,
+    #         "messages": messages
+    #     }
+        
+    #     if system:
+    #         body["system"] = system
+        
+    #     response = self.client.invoke_model(
+    #         modelId=self.model_id,
+    #         contentType="application/json",
+    #         accept="application/json",
+    #         body=json.dumps(body)
+    #     )
+        
+    #     response_body = json.loads(response["body"].read())
+    #     return response_body["content"][0]["text"]
+    
+
+
     def chat_completion(
         self,
         messages: List[Dict[str, Any]],
         system: str = "",
         temperature: float = 0,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
+        max_retries: int = 6
     ) -> str:
         """
-        Send a chat completion request to Claude via Bedrock.
-        
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            system: System prompt
-            temperature: Sampling temperature (0-1)
-            max_tokens: Maximum tokens in response
-            
-        Returns:
-            Response text from Claude
+        Send a chat completion request to Claude via Bedrock with
+        proper throttling protection and backoff.
         """
-        # Build request body for Claude
+
         body = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": messages
         }
-        
+
         if system:
             body["system"] = system
-        
-        response = self.client.invoke_model(
-            modelId=self.model_id,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps(body)
-        )
-        
-        response_body = json.loads(response["body"].read())
-        return response_body["content"][0]["text"]
+
+        delay = 1.0  # initial backoff in seconds
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.client.invoke_model(
+                    modelId=self.model_id,
+                    contentType="application/json",
+                    accept="application/json",
+                    body=json.dumps(body)
+                )
+
+                response_body = json.loads(response["body"].read())
+                content = response_body.get("content", [])
+
+                if not content or not content[0].get("text"):
+                    raise RuntimeError(
+                        "Bedrock returned empty response (likely input too large or model aborted)"
+                    )
+
+                return content[0]["text"]
+
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+
+                if error_code == "ThrottlingException":
+                    if attempt == max_retries:
+                        raise RuntimeError(
+                            f"Bedrock throttled after {max_retries} retries"
+                        ) from e
+
+                    sleep_time = delay + random.uniform(0, 0.5)
+                    print(
+                        f"[Bedrock] Throttled (attempt {attempt}/{max_retries}). "
+                        f"Sleeping {sleep_time:.2f}s"
+                    )
+
+                    time.sleep(sleep_time)
+                    delay = min(delay * 2, 16)  # cap backoff
+                    continue
+
+                # Non-throttling Bedrock error → fail immediately
+                raise RuntimeError(f"Bedrock invoke_model failed: {e}") from e
+
+            except BotoCoreError as e:
+                raise RuntimeError(f"Bedrock client error: {e}") from e
+
+        # Should never reach here
+        raise RuntimeError("Unexpected Bedrock invocation failure")
+
     
     def chat_with_image(
         self,

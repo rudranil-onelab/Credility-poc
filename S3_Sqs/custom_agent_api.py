@@ -1685,7 +1685,7 @@ async def validate_document_with_supporting(
         supporting_results = []
         supporting_temp_files = []
         
-        print(f"[API] Saving supporting documents for direct image analysis (NO OCR)...")
+        # print(f"[API] Saving supporting documents for direct image analysis (NO OCR)...")
         
         for idx, supp_file in enumerate(supporting_files):
             print(f"[API] Saving supporting document {idx+1}: {supp_file.filename}")

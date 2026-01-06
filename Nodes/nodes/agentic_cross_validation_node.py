@@ -10,7 +10,7 @@ import time
 import base64
 from typing import Dict, Any, List, Optional, Tuple
 from ..tools.bedrock_client import get_bedrock_client, strip_json_code_fences
-
+import os
 
 def pdf_to_image_base64(pdf_path: str) -> Tuple[str, str]:
     """
@@ -185,6 +185,33 @@ def textract_pages_to_text(pages: dict) -> str:
                 output += block["Text"] + "\n"
 
     return output
+
+
+def textract_result_to_text(result: Dict[str, Any]) -> str:
+    """
+    Convert a textract result dict into readable text.
+    Handles both the older 'pages' dict format and the standard 'blocks' list.
+    """
+    if not result:
+        return ""
+
+    # If caller provided a pages dict (page_num -> blocks list)
+    if "pages" in result and isinstance(result["pages"], dict):
+        return textract_pages_to_text(result["pages"])
+
+    # If textract returned blocks (common for run_textract_sync_bytes / async)
+    if "blocks" in result and isinstance(result["blocks"], list):
+        lines: List[str] = []
+        for block in result["blocks"]:
+            if block.get("BlockType") == "LINE":
+                text = block.get("Text", "")
+                if text:
+                    lines.append(text)
+        return "\n".join(lines)
+
+    # Fallback to a string representation
+    return str(result)
+
 
 def run_agentic_cross_validation_pipeline(
     main_file_path: str,
@@ -433,45 +460,73 @@ IMPORTANT:
 - Apply custom cross-validation instructions if provided
 - Do NOT approve documents with critical contradictions
 - Return ONLY valid JSON"""
-
+        from ..tools.aws_services import run_textract_local_file
         print("[AGENTIC CROSS VALIDATION] Encoding images for Claude...")
-        
-        # Encode main document image
-        main_image_data = None
+        message_content = []
+
+        # Ensure variables are initialized
         main_media_type = None
+        main_textract_data = None
+
+        # Encode main document (may be PDF -> async S3 upload)
         try:
-            main_image_data, main_media_type = encode_image_to_base64(main_file_path)
-            print(f"[AGENTIC CROSS VALIDATION] Main document encoded: {main_media_type}")
+            main_textract_data = run_textract_local_file(main_file_path)
+            print(f"[AGENTIC CROSS VALIDATION] Main document processed for OCR")
         except Exception as e:
             print(f"[AGENTIC CROSS VALIDATION] Warning: Could not encode main document: {e}")
-        from ..tools.aws_services import run_textract_local_file
+            import traceback
+            traceback.print_exc()
+
+        # Add main document text for Claude (if available)
+        if main_textract_data:
+            try:
+                main_text = textract_result_to_text(main_textract_data)
+            except Exception:
+                main_text = str(main_textract_data)
+
+            message_content.append({
+                "type": "text",
+                "text": f"""
+        MAIN DOCUMENT 1
+        FILE: {os.path.basename(main_file_path)}
+
+        OCR EXTRACTED TEXT:
+        {main_text}
+        """
+            })
+
         # Encode supporting document images
-        import os
-        # supporting_images = []
         for i, file_path in enumerate(supporting_file_paths):
             try:
-                media_type = os.path.splitext(file_path)[1].lower()
-                # image_data, media_type = encode_image_to_base64(file_path)
-                # supporting_images.append((image_data, media_type))
                 textract_data = run_textract_local_file(file_path)
-                document_text = textract_pages_to_text(textract_data["pages"])     
-                print(f"[AGENTIC CROSS VALIDATION] Supporting document {i+1} encoded: {media_type}")
+                print(textract_data)
+
+                # Convert textract result into readable text safely
+                try:
+                    document_text = textract_result_to_text(textract_data)
+                except Exception:
+                    document_text = str(textract_data)
+
+                print(f"[AGENTIC CROSS VALIDATION] Supporting document {i+1} OCR extracted")
+
+                message_content.append({
+                    "type": "text",
+                    "text": f"""
+        SUPPORTING DOCUMENT {i+1}
+        FILE: {os.path.basename(file_path)}
+
+        OCR EXTRACTED TEXT:
+        {document_text}
+        """
+                })
+
             except Exception as e:
-                print(f"[AGENTIC CROSS VALIDATION] Warning: Could not encode supporting document {i+1}: {e}")
-        
+                print(f"[AGENTIC CROSS VALIDATION] Warning: Could not process supporting document {i+1}: {e}")
+                import traceback
+                traceback.print_exc()
         # Build message content with all images
-        message_content = []
         
-        # Add main document image first
-        if main_image_data:
-            message_content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": main_media_type,
-                    "data": main_image_data
-                }
-            })
+        
         
         # Add all supporting document images
         # for image_data, media_type in supporting_images:
@@ -483,7 +538,6 @@ IMPORTANT:
         #             "data": image_data
         #         }
         #     })
-        message_content.append(document_text)
         # Add text prompt
         message_content.append({
             "type": "text",
@@ -491,7 +545,7 @@ IMPORTANT:
         })
         
         print(f"[AGENTIC CROSS VALIDATION] Sending {len(message_content) - 1} images to Claude for analysis...")
-        
+        time.sleep(1)
         # Send to Claude with all images
         response = client.chat_completion(
             messages=[{"role": "user", "content": message_content}],

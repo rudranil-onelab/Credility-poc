@@ -36,7 +36,7 @@ BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20
 S3_BUCKET = os.getenv("S3_BUCKET", "proj-finance-agents")
 # Textract Configuration
 TEXTRACT_MAX_WAIT_SECONDS = int(os.getenv("TEXTRACT_MAX_WAIT_SECONDS", "600"))
-TEXTRACT_FEATURE_TYPES = ["TABLES", "FORMS"]
+TEXTRACT_FEATURE_TYPES = ["TABLES", "FORMS","LAYOUT"]
 
 # Output Configuration
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "outputs")
