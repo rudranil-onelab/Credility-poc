@@ -135,14 +135,7 @@ class BedrockClaudeClient:
                 )
 
                 response_body = json.loads(response["body"].read())
-                content = response_body.get("content", [])
-
-                if not content or not content[0].get("text"):
-                    raise RuntimeError(
-                        "Bedrock returned empty response (likely input too large or model aborted)"
-                    )
-
-                return content[0]["text"]
+                return response_body["content"][0]["text"]
 
             except ClientError as e:
                 error_code = e.response.get("Error", {}).get("Code", "")
