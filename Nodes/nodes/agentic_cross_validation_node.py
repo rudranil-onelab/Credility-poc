@@ -189,25 +189,79 @@ def textract_pages_to_text(pages: dict) -> str:
 
 def textract_result_to_text(result: Dict[str, Any]) -> str:
     """
-    Convert a textract result dict into readable text.
-    Handles both the older 'pages' dict format and the standard 'blocks' list.
+    Convert a Textract result dict into readable text.
+    Preserves existing LINE-based output but also injects
+    KEY : VALUE pairs from Forms into the same string.
     """
+
     if not result:
         return ""
 
-    # If caller provided a pages dict (page_num -> blocks list)
+    # -------- Case 1: Your internal pages format --------
     if "pages" in result and isinstance(result["pages"], dict):
         return textract_pages_to_text(result["pages"])
 
-    # If textract returned blocks (common for run_textract_sync_bytes / async)
-    if "blocks" in result and isinstance(result["blocks"], list):
-        lines: List[str] = []
-        for block in result["blocks"]:
-            if block.get("BlockType") == "LINE":
-                text = block.get("Text", "")
-                if text:
-                    lines.append(text)
-        return "\n".join(lines)
+    # -------- Case 2: Standard Textract blocks --------
+    if "blocks" not in result or not isinstance(result["blocks"], list):
+        return ""
+
+    blocks = result["blocks"]
+
+    block_map = {b["Id"]: b for b in blocks if "Id" in b}
+
+    lines: List[str] = []
+    kv_lines: List[str] = []
+
+    # ------------------------
+    # Helper to resolve text
+    # ------------------------
+    def get_text(block):
+        text = ""
+        for rel in block.get("Relationships", []):
+            if rel["Type"] == "CHILD":
+                for cid in rel["Ids"]:
+                    child = block_map.get(cid)
+                    if not child:
+                        continue
+                    if child["BlockType"] == "WORD":
+                        text += child.get("Text", "") + " "
+                    elif child["BlockType"] == "SELECTION_ELEMENT":
+                        if child.get("SelectionStatus") == "SELECTED":
+                            text += "X "
+        return text.strip()
+
+    # ------------------------
+    # 1. Normal OCR text (existing behavior)
+    # ------------------------
+    for block in blocks:
+        if block.get("BlockType") == "LINE":
+            text = block.get("Text", "")
+            if text:
+                lines.append(text)
+
+    # ------------------------
+    # 2. Extract Form fields
+    # ------------------------
+    for block in blocks:
+        if block.get("BlockType") == "KEY_VALUE_SET" and "KEY" in block.get("EntityTypes", []):
+            key = get_text(block)
+
+            value = ""
+            for rel in block.get("Relationships", []):
+                if rel["Type"] == "VALUE":
+                    for vid in rel["Ids"]:
+                        value = get_text(block_map.get(vid, {}))
+
+            if key and value:
+                kv_lines.append(f"{key} : {value}")
+
+    # ------------------------
+    # Merge safely into single string
+    # ------------------------
+    if kv_lines:
+        return "\n".join(lines) + "\n\n--- FORMS ---\n" + "\n".join(kv_lines)
+
+    return "\n".join(lines)
 
     # Fallback to a string representation
     return str(result)
