@@ -594,7 +594,6 @@ IMPORTANT:
         for i, file_path in enumerate(supporting_file_paths):
             try:
                 textract_data = run_textract_local_file(file_path)
-                print(textract_data)
 
                 # Convert textract result into readable text safely
                 try:
