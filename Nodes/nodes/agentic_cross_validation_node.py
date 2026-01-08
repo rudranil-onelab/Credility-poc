@@ -565,7 +565,10 @@ IMPORTANT:
 
         # Encode main document (may be PDF -> async S3 upload)
         try:
+            main_doc_ocr_start = time.time()
             main_textract_data = run_textract_local_file(main_file_path)
+            main_doc_ocr_time = time.time() - main_doc_ocr_start
+            print(f"[AGENTIC CROSS VALIDATION] Main document OCR completed in {main_doc_ocr_time:.2f} seconds")
             print(f"[AGENTIC CROSS VALIDATION] Main document processed for OCR")
         except Exception as e:
             print(f"[AGENTIC CROSS VALIDATION] Warning: Could not encode main document: {e}")
@@ -591,6 +594,7 @@ IMPORTANT:
             })
 
         # Encode supporting document images
+        supporting_docs_OCR_start = time.time()
         for i, file_path in enumerate(supporting_file_paths):
             try:
                 textract_data = run_textract_local_file(file_path)
@@ -606,20 +610,21 @@ IMPORTANT:
                 message_content.append({
                     "type": "text",
                     "text": f"""
-        SUPPORTING DOCUMENT {i+1}
-        FILE: {os.path.basename(file_path)}
+                        SUPPORTING DOCUMENT {i+1}
+                        FILE: {os.path.basename(file_path)}
 
-        OCR EXTRACTED TEXT:
-        {document_text}
-        """
-                })
+                        OCR EXTRACTED TEXT:
+                        {document_text}
+                        """
+                                })
 
             except Exception as e:
                 print(f"[AGENTIC CROSS VALIDATION] Warning: Could not process supporting document {i+1}: {e}")
                 import traceback
                 traceback.print_exc()
         # Build message content with all images
-        
+        supporting_docs_OCR_time = time.time() - supporting_docs_OCR_start
+        print(f"[AGENTIC CROSS VALIDATION] Supporting documents OCR completed in {supporting_docs_OCR_time:.2f} seconds")
         
         
         # Add all supporting document images
@@ -640,6 +645,7 @@ IMPORTANT:
         
         print(f"[AGENTIC CROSS VALIDATION] Sending {len(message_content) - 1} images to Claude for analysis...")
         time.sleep(1)
+        cv_llm_start = time.time()  
         # Send to Claude with all images
         response = client.chat_completion(
             messages=[{"role": "user", "content": message_content}],
@@ -647,7 +653,8 @@ IMPORTANT:
             temperature=0,
             max_tokens=8192
         )
-        
+        cv_llm_time = time.time() - cv_llm_start
+        print(f"[AGENTIC CROSS VALIDATION] Claude response received in {cv_llm_time:.2f} seconds")
         # Parse response
         response = strip_json_code_fences(response)
         agentic_cross_validation_result = json.loads(response)

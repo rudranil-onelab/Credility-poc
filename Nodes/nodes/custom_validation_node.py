@@ -263,8 +263,8 @@ def run_custom_validation_pipeline(
     try:
         # Step 1: Run AWS Textract OCR
         print("[Custom Pipeline] Step 1/2: Running AWS Textract OCR...")
+        ocr_start = time.time()
         textract_result = run_textract_local_file(file_path)
-        
         if not textract_result or not textract_result.get("blocks"):
             return {
                 "status": "error",
@@ -291,7 +291,8 @@ def run_custom_validation_pipeline(
         # Extract text from Textract blocks
         ocr_text = extract_text_from_textract(textract_result)
         print(f"[Custom Pipeline] Textract extracted {len(ocr_text)} characters")
-        
+        ocr_time = time.time() - ocr_start
+        print(f"[Custom Pipeline] Textract OCR completed in {ocr_time:.2f} seconds")
         # Step 2: Run LLM validation with user prompt
         print("[Custom Pipeline] Step 2/2: Running LLM validation with user prompt...")
         # result = validate_with_llm(
@@ -300,13 +301,15 @@ def run_custom_validation_pipeline(
         #     textract_blocks=textract_result.get("blocks", [])
             
         # )
+        llm_start = time.time()
         result = validate_with_llmv2(
             ocr_text=ocr_text,
             user_prompt=user_prompt,
             textract_blocks=textract_result.get("blocks", []),
             # file=file
         )
-        
+        llm_time = time.time() - llm_start
+        print(f"[Custom Pipeline] LLM validation completed in {llm_time:.2f} seconds")
         # ===== VISUAL TAMPERING DETECTION =====
         tampering_score = None
         tampering_status = None
@@ -314,6 +317,7 @@ def run_custom_validation_pipeline(
         
         # Only run tampering detection if tamper_check is enabled
         if tamper_check:
+            temp_start = time.time()
             tampering_status = "enabled"  # Add this line
             print("\n" + "=" * 60)
             print("[🔍 TAMPERING DETECTION] Starting visual tampering check...")
@@ -383,7 +387,8 @@ def run_custom_validation_pipeline(
                     )
                     
                     print(f"[TAMPERING] Analysis complete, processing results...")
-                    
+                    temp_time = time.time() - temp_start
+                    print(f"[TAMPERING] Tampering detection completed in {temp_time:.2f} seconds")
                     if tampering_result:
                         tampering_score = tampering_result.get("risk_score", 0)
                         

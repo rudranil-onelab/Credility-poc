@@ -1654,7 +1654,7 @@ async def validate_document_with_supporting(
         
         print(f"\n{'='*70}")
         print(f"[API] Processing document validation with agentic cross validation")
-        print(f"[API] Mode: Supporting documents sent DIRECTLY to Claude (NO OCR)")
+        # print(f"[API] Mode: Supporting documents sent DIRECTLY to Claude (NO OCR)")
         print(f"[API] Agent: {agent_name}")
         print(f"[API] Main document: {main_file.filename}")
         print(f"[API] Supporting documents: {len(supporting_files)}")
@@ -1712,7 +1712,7 @@ async def validate_document_with_supporting(
         print(f"\n[API] Running agentic cross validation with DIRECT IMAGE ANALYSIS (NO OCR for supporting docs)...")
         
         from Nodes.nodes.agentic_cross_validation_node import run_agentic_cross_validation_pipeline
-        
+        cv_time_start = time.time()
         agentic_cross_validation_result = run_agentic_cross_validation_pipeline(
             main_file_path=temp_main.name,
             main_extracted_json=main_result.get("doc_extracted_json", {}),
@@ -1725,7 +1725,8 @@ async def validate_document_with_supporting(
             cross_validation_prompt=cross_validation_prompt,
             mode=agent['mode']
         )
-        
+        cv_time_end = time.time()
+        print(f"[API] Agentic cross validation completed in {int(cv_time_end - cv_time_start)} seconds")
         # Determine overall status
         # Fail if: main validation fails OR agentic cross validation fails (risk_score > 70)
         main_validation_passed = main_result.get("status") == "pass"
