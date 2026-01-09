@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Create router
-router = APIRouter(prefix="/api", tags=["Custom Agents"])
+router = APIRouter(tags=["Custom Agents"])
 
 # S3 Configuration for reference images
 S3_BUCKET = os.getenv("S3_BUCKET", "lendingwise-poc")
