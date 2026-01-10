@@ -383,7 +383,7 @@ def log_api_call(
 
 
 # API Endpoints
-@app.get("/status")
+@app.get("/api/status")
 async def root():
     """Root endpoint - API health check"""
     return {
