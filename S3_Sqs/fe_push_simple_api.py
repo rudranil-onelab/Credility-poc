@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, status, Request
+from fastapi import FastAPI, HTTPException, status, Request,APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -45,7 +45,7 @@ app = FastAPI(
     description="API for creating AI agent records, testing document processing pipeline, and custom dynamic agents",
     version="2.0.0"
 )
-
+api = APIRouter(prefix="/api")
 # Include custom agent routes
 app.include_router(custom_agent_router)
 
