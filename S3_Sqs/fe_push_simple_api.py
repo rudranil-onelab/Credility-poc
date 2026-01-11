@@ -50,15 +50,25 @@ api = APIRouter(prefix="/api")
 app.include_router(custom_agent_router)
 
 # Configure CORS
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],  # Allows all origins - restrict this in production
+#     allow_credentials=True,
+#     allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
+#     allow_headers=["*"],  # Allows all headers
+# )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins - restrict this in production
+    allow_origins=[
+        "http://3.235.84.54",
+        "http://localhost:3005",
+        "http://127.0.0.1:3005"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-
-
 # Pydantic model for request
 class AgentRecordCreate(BaseModel):
     """Model for creating a new agent record"""
