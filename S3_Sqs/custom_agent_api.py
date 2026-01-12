@@ -321,14 +321,16 @@ Analyze these prompts and create an intelligently merged result. Return JSON."""
         print(f"[Smart Merge] Existing prompt length: {len(existing_prompt)} chars")
         print(f"[Smart Merge] New prompt length: {len(new_prompt)} chars")
         
-        response = client.chat_completion(
-            messages=[{"role": "user", "content": user_message}],
-            system=system_prompt + "\n\nIMPORTANT: Return ONLY valid JSON, no markdown or explanations.",
-            temperature=0
-        )
+        # response = client.chat_completion(
+        #     messages=[{"role": "user", "content": user_message}],
+        #     system=system_prompt + "\n\nIMPORTANT: Return ONLY valid JSON, no markdown or explanations.",
+        #     temperature=0
+        # )
         
-        content = strip_json_code_fences(response)
-        result = json.loads(content)
+        # content = strip_json_code_fences(response)
+        #disable bedrock for now we are not using supporting docs to creaet prompt.
+        #Direct user is final as updated.
+        result = json.loads(new_prompt)
         
         # Validate result structure
         if "merged_prompt" not in result:
@@ -340,7 +342,7 @@ Analyze these prompts and create an intelligently merged result. Return JSON."""
         
         print(f"[Smart Merge] Merge complete:")
         print(f"[Smart Merge]   - Changes made: {len(result['changes_made'])}")
-        print(f"[Smart Merge]   - Contradictions resolved: {len(result['contradictions_resolved'])}")
+        # print(f"[Smart Merge]   - Contradictions resolved: {len(result['contradictions_resolved'])}")
         print(f"[Smart Merge]   - Merged prompt length: {len(result['merged_prompt'])} chars")
         
         return result
@@ -1045,17 +1047,17 @@ async def update_agent(
         reference_images = []
         per_image_descriptions = []
         
-        for idx, (img, ctx) in enumerate(reference_pairs, start=1):
-            if img and img.filename:
-                reference_images.append(img)
-                per_image_descriptions.append(ctx)  # Can be None
-                if ctx:
-                    print(f"[Update] reference_{idx} has context: {ctx[:50]}...")
+        # for idx, (img, ctx) in enumerate(reference_pairs, start=1):
+        #     if img and img.filename:
+        #         reference_images.append(img)
+        #         per_image_descriptions.append(ctx)  # Can be None
+        #         if ctx:
+        #             print(f"[Update] reference_{idx} has context: {ctx[:50]}...")
         
         # Log per-image descriptions count
-        if per_image_descriptions:
-            desc_count = len([d for d in per_image_descriptions if d])
-            print(f"[Update] Received {desc_count} per-image descriptions out of {len(per_image_descriptions)} images")
+        # if per_image_descriptions:
+        #     desc_count = len([d for d in per_image_descriptions if d])
+        #     print(f"[Update] Received {desc_count} per-image descriptions out of {len(per_image_descriptions)} images")
         
         # Process reference images if provided
         new_reference_images = None
@@ -1068,123 +1070,124 @@ async def update_agent(
         if description:
             existing_prompt = agent.get("prompt", "")
             if existing_prompt and existing_prompt.strip():
+                final_description = description
                 # Use smart merge to intelligently combine existing and new prompts
-                print(f"[Update] Smart merging prompts...")
-                smart_merge_result = smart_merge_prompts(existing_prompt, description)
-                final_description = smart_merge_result.get("merged_prompt", description)
+                # print(f"[Update] Smart merging prompts...")
+                # smart_merge_result = smart_merge_prompts(existing_prompt, description)
+                # final_description = smart_merge_result.get("merged_prompt", description)
                 
-                # Log changes made
-                changes = smart_merge_result.get("changes_made", [])
-                contradictions = smart_merge_result.get("contradictions_resolved", [])
+                # # Log changes made
+                # changes = smart_merge_result.get("changes_made", [])
+                # contradictions = smart_merge_result.get("contradictions_resolved", [])
                 
-                if changes:
-                    updates_made.append(f"Smart merged prompt with {len(changes)} change(s)")
-                if contradictions:
-                    updates_made.append(f"Resolved {len(contradictions)} contradiction(s)")
-                    for c in contradictions:
-                        print(f"[Update] Contradiction resolved: {c.get('field', 'unknown')} - {c.get('resolution', '')}")
+                # if changes:
+                #     updates_made.append(f"Smart merged prompt with {len(changes)} change(s)")
+                # if contradictions:
+                #     updates_made.append(f"Resolved {len(contradictions)} contradiction(s)")
+                #     for c in contradictions:
+                #         print(f"[Update] Contradiction resolved: {c.get('field', 'unknown')} - {c.get('resolution', '')}")
             else:
                 # No existing prompt, just use new one
                 final_description = description
         
-        if reference_images and len(reference_images) > 0 and reference_images[0].filename:
-            # Filter out empty uploads
-            valid_images = [img for img in reference_images if img.filename]
+        # if reference_images and len(reference_images) > 0 and reference_images[0].filename:
+        #     # Filter out empty uploads
+        #     valid_images = [img for img in reference_images if img.filename]
             
-            if valid_images:
-                # Get existing images if appending
-                existing_images = []
-                if append_images and agent.get("reference_images"):
-                    existing_images = agent["reference_images"]
+        #     if valid_images:
+        #         # Get existing images if appending
+        #         existing_images = []
+        #         if append_images and agent.get("reference_images"):
+        #             existing_images = agent["reference_images"]
                 
-                # Check total count
-                total_images = len(existing_images) + len(valid_images)
-                if total_images > MAX_REFERENCE_IMAGES:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Maximum {MAX_REFERENCE_IMAGES} reference images allowed. You have {len(existing_images)} existing + {len(valid_images)} new = {total_images} total."
-                    )
+        #         # Check total count
+        #         total_images = len(existing_images) + len(valid_images)
+        #         if total_images > MAX_REFERENCE_IMAGES:
+        #             raise HTTPException(
+        #                 status_code=400,
+        #                 detail=f"Maximum {MAX_REFERENCE_IMAGES} reference images allowed. You have {len(existing_images)} existing + {len(valid_images)} new = {total_images} total."
+        #             )
                 
-                allowed_types = ["image/jpeg", "image/png", "image/jpg", "image/webp", "application/pdf"]
+        #         allowed_types = ["image/jpeg", "image/png", "image/jpg", "image/webp", "application/pdf"]
                 
-                # Upload new images
-                for idx, ref_image in enumerate(valid_images, start=len(existing_images) + 1):
-                    if ref_image.content_type not in allowed_types:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Invalid file type '{ref_image.content_type}' for image {idx}. Allowed: JPEG, PNG, WebP, PDF"
-                        )
+        #         # Upload new images
+        #         for idx, ref_image in enumerate(valid_images, start=len(existing_images) + 1):
+        #             if ref_image.content_type not in allowed_types:
+        #                 raise HTTPException(
+        #                     status_code=400,
+        #                     detail=f"Invalid file type '{ref_image.content_type}' for image {idx}. Allowed: JPEG, PNG, WebP, PDF"
+        #                 )
                     
-                    content = await ref_image.read()
+        #             content = await ref_image.read()
                     
-                    # Upload to S3
-                    s3_url = upload_reference_image_to_s3(
-                        file_content=content,
-                        filename=ref_image.filename,
-                        agent_name=agent_name,
-                        image_index=idx
-                    )
-                    uploaded_s3_urls.append(s3_url)
+        #             # Upload to S3
+        #             s3_url = upload_reference_image_to_s3(
+        #                 file_content=content,
+        #                 filename=ref_image.filename,
+        #                 agent_name=agent_name,
+        #                 image_index=idx
+        #             )
+        #             uploaded_s3_urls.append(s3_url)
                     
-                    # Save to temp file for knowledge extraction
-                    suffix = Path(ref_image.filename).suffix or ".png"
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                        tmp.write(content)
-                        temp_file_paths.append(tmp.name)
+        #             # Save to temp file for knowledge extraction
+        #             suffix = Path(ref_image.filename).suffix or ".png"
+        #             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        #                 tmp.write(content)
+        #                 temp_file_paths.append(tmp.name)
                 
-                print(f"[Update] Uploaded {len(uploaded_s3_urls)} new reference images for agent '{agent_name}'")
+        #         print(f"[Update] Uploaded {len(uploaded_s3_urls)} new reference images for agent '{agent_name}'")
                 
-                # Combine with existing if appending
-                if append_images:
-                    new_reference_images = existing_images + uploaded_s3_urls
-                    updates_made.append(f"Added {len(uploaded_s3_urls)} reference images (total: {len(new_reference_images)})")
-                else:
-                    new_reference_images = uploaded_s3_urls
-                    updates_made.append(f"Replaced reference images with {len(uploaded_s3_urls)} new images")
+        #         # Combine with existing if appending
+        #         if append_images:
+        #             new_reference_images = existing_images + uploaded_s3_urls
+        #             updates_made.append(f"Added {len(uploaded_s3_urls)} reference images (total: {len(new_reference_images)})")
+        #         else:
+        #             new_reference_images = uploaded_s3_urls
+        #             updates_made.append(f"Replaced reference images with {len(uploaded_s3_urls)} new images")
                 
-                # Re-extract knowledge from images
-                # Use the description to update, or fall back to existing prompt
-                base_description = description if description else agent.get("prompt", "")
+        #         # Re-extract knowledge from images
+        #         # Use the description to update, or fall back to existing prompt
+        #         base_description = description if description else agent.get("prompt", "")
                 
-                if temp_file_paths and (extract_knowledge_from_reference_image or merge_knowledge_from_multiple_images):
-                    if len(temp_file_paths) == 1 and not append_images:
-                        # Single new image
-                        if extract_knowledge_from_reference_image:
-                            # Build prompt with per-image description if available
-                            combined_prompt = base_description
-                            if per_image_descriptions and len(per_image_descriptions) > 0 and per_image_descriptions[0]:
-                                img_desc = per_image_descriptions[0]
-                                combined_prompt = f"{base_description}\n\nImage-specific context: {img_desc}"
-                                print(f"[Update] Using per-image description: {img_desc}")
+        #         if temp_file_paths and (extract_knowledge_from_reference_image or merge_knowledge_from_multiple_images):
+        #             if len(temp_file_paths) == 1 and not append_images:
+        #                 # Single new image
+        #                 if extract_knowledge_from_reference_image:
+        #                     # Build prompt with per-image description if available
+        #                     combined_prompt = base_description
+        #                     if per_image_descriptions and len(per_image_descriptions) > 0 and per_image_descriptions[0]:
+        #                         img_desc = per_image_descriptions[0]
+        #                         combined_prompt = f"{base_description}\n\nImage-specific context: {img_desc}"
+        #                         print(f"[Update] Using per-image description: {img_desc}")
                             
-                            print(f"[Update] Extracting knowledge from new reference image")
-                            knowledge_result = extract_knowledge_from_reference_image(
-                                image_path_or_url=temp_file_paths[0],
-                                user_prompt=combined_prompt
-                            )
-                            if knowledge_result.get("success"):
-                                final_description = knowledge_result["enhanced_prompt"]
-                                extracted_knowledge = knowledge_result["extracted_knowledge"]
-                                knowledge_extracted = True
-                                print(f"[Update] Knowledge extracted: {knowledge_result.get('document_type', 'Unknown')}")
-                    else:
-                        # Multiple images - merge knowledge
-                        if merge_knowledge_from_multiple_images:
-                            # Pass per-image contexts directly to the merge function
-                            # Each image will receive ONLY its specific context
-                            print(f"[Update] Using {len([d for d in per_image_descriptions if d])} per-image descriptions")
+        #                     print(f"[Update] Extracting knowledge from new reference image")
+        #                     knowledge_result = extract_knowledge_from_reference_image(
+        #                         image_path_or_url=temp_file_paths[0],
+        #                         user_prompt=combined_prompt
+        #                     )
+        #                     if knowledge_result.get("success"):
+        #                         final_description = knowledge_result["enhanced_prompt"]
+        #                         extracted_knowledge = knowledge_result["extracted_knowledge"]
+        #                         knowledge_extracted = True
+        #                         print(f"[Update] Knowledge extracted: {knowledge_result.get('document_type', 'Unknown')}")
+        #             else:
+        #                 # Multiple images - merge knowledge
+        #                 if merge_knowledge_from_multiple_images:
+        #                     # Pass per-image contexts directly to the merge function
+        #                     # Each image will receive ONLY its specific context
+        #                     print(f"[Update] Using {len([d for d in per_image_descriptions if d])} per-image descriptions")
                             
-                            print(f"[Update] Merging knowledge from {len(temp_file_paths)} reference images")
-                            merge_result = merge_knowledge_from_multiple_images(
-                                image_paths=temp_file_paths,
-                                user_prompt=base_description,  # Base description (centralized rules)
-                                per_image_contexts=per_image_descriptions  # Each image's specific context
-                            )
-                            if merge_result.get("success"):
-                                final_description = merge_result["enhanced_prompt"]
-                                extracted_knowledge = merge_result["extracted_knowledge"]
-                                knowledge_extracted = True
-                                print(f"[Update] Knowledge merged from {len(temp_file_paths)} images")
+        #                     print(f"[Update] Merging knowledge from {len(temp_file_paths)} reference images")
+        #                     merge_result = merge_knowledge_from_multiple_images(
+        #                         image_paths=temp_file_paths,
+        #                         user_prompt=base_description,  # Base description (centralized rules)
+        #                         per_image_contexts=per_image_descriptions  # Each image's specific context
+        #                     )
+        #                     if merge_result.get("success"):
+        #                         final_description = merge_result["enhanced_prompt"]
+        #                         extracted_knowledge = merge_result["extracted_knowledge"]
+        #                         knowledge_extracted = True
+        #                         print(f"[Update] Knowledge merged from {len(temp_file_paths)} images")
         
         # Update the agent
         updated = service.update_agent(
