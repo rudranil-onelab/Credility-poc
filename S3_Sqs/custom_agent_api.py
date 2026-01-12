@@ -330,7 +330,12 @@ Analyze these prompts and create an intelligently merged result. Return JSON."""
         # content = strip_json_code_fences(response)
         #disable bedrock for now we are not using supporting docs to creaet prompt.
         #Direct user is final as updated.
-        result = json.loads(new_prompt)
+        content = {
+                "merged_prompt": new_prompt,
+                "changes_made": [],
+                "contradictions_resolved": []
+                }
+        result = json.loads(content)
         
         # Validate result structure
         if "merged_prompt" not in result:
