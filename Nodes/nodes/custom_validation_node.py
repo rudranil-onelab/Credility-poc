@@ -296,7 +296,7 @@ def run_custom_validation_pipeline(
         # Step 2: Run LLM validation with user prompt
         print("[Custom Pipeline] Step 2/2: Running LLM validation with user prompt...")
         llm_start = time.time()
-        result = validate_with_llm(
+        result = validate_with_llmv2(
             ocr_text=ocr_text,
             user_prompt=user_prompt,
             textract_blocks=textract_result.get("blocks", [])
