@@ -295,44 +295,43 @@ def run_custom_validation_pipeline(
         print(f"[Custom Pipeline] Textract OCR completed in {ocr_time:.2f} seconds")
         # Step 2: Run LLM validation with user prompt
         print("[Custom Pipeline] Step 2/2: Running LLM validation with user prompt...")
-        # result = validate_with_llm(
-        #     ocr_text=ocr_text,
-        #     user_prompt=user_prompt,
-        #     textract_blocks=textract_result.get("blocks", [])
-            
-        # )
         llm_start = time.time()
-        
+        result = validate_with_llm(
+            ocr_text=ocr_text,
+            user_prompt=user_prompt,
+            textract_blocks=textract_result.get("blocks", [])
+            
+        )
         # Prepare image for image-only validation
-        try:
-            from .generic_extraction import prepare_document_for_vision
-            from .image_validation import validate_with_llmv2_image_only
-            image_urls = prepare_document_for_vision(file_path)
-            image_data = image_urls[0] if image_urls else None
-            print(f"[Custom Pipeline] Prepared image for image-only validation (pages: {len(image_urls)})")
-        except Exception as e:
-            print(f"[Custom Pipeline] Could not prepare image for vision: {e}")
-            image_data = None
+        # try:
+        #     from .generic_extraction import prepare_document_for_vision
+        #     from .image_validation import validate_with_llmv2_image_only
+        #     image_urls = prepare_document_for_vision(file_path)
+        #     image_data = image_urls[0] if image_urls else None
+        #     print(f"[Custom Pipeline] Prepared image for image-only validation (pages: {len(image_urls)})")
+        # except Exception as e:
+        #     print(f"[Custom Pipeline] Could not prepare image for vision: {e}")
+        #     image_data = None
 
-        if image_data:
-            # Image-only validation: send only the image + user prompt to the model
-            result = validate_with_llmv2_image_only(
-                image_data=image_data,
-                user_prompt=user_prompt
-            )
-        else:
-            # Fallback to original OCR-based validation
-            # result = validate_with_llmv2(
-            #     ocr_text=ocr_text,
-            #     user_prompt=user_prompt,
-            #     textract_blocks=textract_result.get("blocks", []),
-            #     # file=file
-            # )
-            result = validate_with_llmv2(
-                ocr_text=ocr_text,
-                user_prompt=user_prompt,
-                textract_blocks=textract_result.get("blocks", []),
-            )
+        # if image_data:
+        #     # Image-only validation: send only the image + user prompt to the model
+        #     result = validate_with_llmv2_image_only(
+        #         image_data=image_data,
+        #         user_prompt=user_prompt
+        #     )
+        # else:
+        #     # Fallback to original OCR-based validation
+        #     # result = validate_with_llmv2(
+        #     #     ocr_text=ocr_text,
+        #     #     user_prompt=user_prompt,
+        #     #     textract_blocks=textract_result.get("blocks", []),
+        #     #     # file=file
+        #     # )
+        #     result = validate_with_llmv2(
+        #         ocr_text=ocr_text,
+        #         user_prompt=user_prompt,
+        #         textract_blocks=textract_result.get("blocks", []),
+        #     )
 
         llm_time = time.time() - llm_start
         print(f"[Custom Pipeline] LLM validation completed in {llm_time:.2f} seconds")
